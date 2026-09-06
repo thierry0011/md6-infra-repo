@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  To-Do App - ECR repository for the Django application image. Scans on
+  push, keeps the last 20 tagged images, expires untagged images after 1
+  day (shouldn't normally happen - every build pushes exactly one tag).
+  ImageTagMutability is IMMUTABLE: CI pushes one unique tag per build
+  (e.g. sha-<gitsha>) and never reuses a tag, so there is no mutable
+  "latest" pointer to protect - see 09-cicd-pipeline.yaml for how the
+  EventBridge rule still triggers a deployment for each new push without
+  relying on one. The repository policy trusts the GitHub Actions role
+  created by the github-oidc stack; this stack depends on that one's
+  GitHubActionsRoleArn output. Nested-stack ordering guarantees that role
+  exists by the time this template needs it.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: md6-todo
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  AppKmsKeyArn:
+    Type: String
+    Description: Shared CMK ARN from the security stack.
+
+  GitHubActionsRoleArn:
+    Type: String
+    Description: ARN of the GitHub Actions OIDC role, from the github-oidc stack.
+
+Resources:
+  AppRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${ProjectName}-${Environment}-app
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: IMMUTABLE
+      EncryptionConfiguration:
+        EncryptionType: KMS
+        KmsKey: !Ref AppKmsKeyArn
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images after 1 day",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 1
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep only the last 20 tagged images",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["sha-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 20
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      RepositoryPolicyText:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowGitHubActionsPush
+            Effect: Allow
+            Principal:
+              AWS: !Ref GitHubActionsRoleArn
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:PutImage
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-app-repo
+
+Outputs:
+  RepositoryName:
+    Value: !Ref AppRepository
+
+  RepositoryArn:
+    Value: !GetAtt AppRepository.Arn
+
+  RepositoryUri:
+    Value: !GetAtt AppRepository.RepositoryUri

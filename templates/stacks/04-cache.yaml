@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  To-Do App - ElastiCache Redis in dedicated cache subnets, used to
+  accelerate reads. A ReplicationGroup is used even for the single-node
+  default (NumCacheClusters: 1) so bumping to a Multi-AZ posture later is a
+  parameter change, not a resource-type change - AutomaticFailoverEnabled
+  and MultiAZEnabled flip on automatically once NumCacheClusters > 1.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: md6-todo
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  CacheNodeType:
+    Type: String
+    Default: cache.t3.micro
+
+  NumCacheClusters:
+    Type: Number
+    Default: 1
+    Description: 1 = single node (cost-optimized default). 2+ turns on automatic failover / Multi-AZ.
+
+  CacheSubnet1Id:
+    Type: String
+    Description: Cache subnet 1 id from the network stack.
+
+  CacheSubnet2Id:
+    Type: String
+    Description: Cache subnet 2 id from the network stack.
+
+  CacheSecurityGroupId:
+    Type: String
+    Description: Cache security group id from the security stack.
+
+  AppKmsKeyArn:
+    Type: String
+    Description: Shared CMK ARN from the security stack.
+
+Conditions:
+  IsMultiNode: !Not [!Equals [!Ref NumCacheClusters, "1"]]
+
+Resources:
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: !Sub Cache subnets for ${ProjectName}-${Environment} ElastiCache
+      SubnetIds:
+        - !Ref CacheSubnet1Id
+        - !Ref CacheSubnet2Id
+
+  RedisReplicationGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupId: !Sub ${ProjectName}-${Environment}-redis
+      ReplicationGroupDescription: !Sub Redis cache for ${ProjectName}-${Environment}
+      Engine: redis
+      CacheNodeType: !Ref CacheNodeType
+      NumCacheClusters: !Ref NumCacheClusters
+      AutomaticFailoverEnabled: !If [IsMultiNode, true, false]
+      MultiAZEnabled: !If [IsMultiNode, true, false]
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+      SecurityGroupIds:
+        - !Ref CacheSecurityGroupId
+      AtRestEncryptionEnabled: true
+      KmsKeyId: !Ref AppKmsKeyArn
+      # In-transit encryption stays off by default to keep the app's Redis
+      # client simple (plain `redis://`, no TLS cert handling) - flip on
+      # (and switch the app to `rediss://`) for a real production posture.
+      TransitEncryptionEnabled: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-redis
+
+Outputs:
+  CacheEndpointAddress:
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+
+  CacheEndpointPort:
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port

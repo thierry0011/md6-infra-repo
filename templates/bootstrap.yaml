@@ -1,0 +1,533 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  To-Do App - one-time bootstrap prerequisite. NOT part of the nested-stack
+  tree, deployed standalone, first, and never superseded by root.yaml.
+  Creates the S3 bucket that CI packages nested-stack templates into, and
+  InfraDeployRole: a single dual-trust IAM role assumed both by the infra
+  repo's GitHub Actions workflow (via OIDC, to package AND deploy root.yaml
+  directly - no packaged template is ever committed to the repo) and by
+  CloudFormation itself (as the execution role for every resource the
+  nested stacks create). Nothing here depends on RDS, ElastiCache, or any
+  other resource created later - by design, since none of that exists yet
+  when this stack is deployed.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: md6-todo
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  GitHubOrg:
+    Type: String
+    Description: GitHub org or username that owns the infra repo, e.g. "thierry0011".
+
+  GitHubInfraRepo:
+    Type: String
+    Default: md6-infra-repo
+    Description: Name of this infrastructure repository.
+
+  GitHubDeployBranch:
+    Type: String
+    Default: main
+    Description: Branch allowed to assume the deploy role.
+
+  CreateOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "false" if a token.actions.githubusercontent.com OIDC provider
+      already exists in this AWS account (an account can only have one).
+
+Conditions:
+  ShouldCreateOidcProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  TemplatesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub ${ProjectName}-${Environment}-cfn-templates-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cfn-templates
+
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  # Dual-trust: GitHub Actions (OIDC) assumes this to run `cloudformation
+  # package`+`deploy`, and CloudFormation assumes the same role while it
+  # provisions the resources declared in root.yaml's nested stacks.
+  InfraDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-github-actions-cfn-deploy
+      Description: >
+        Assumed by the infra repo's GitHub Actions workflow via OIDC to
+        package and deploy the nested stack, and by CloudFormation as the
+        execution role while it provisions the resources declared in it.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: GitHubActionsOidc
+            Effect: Allow
+            Principal:
+              Federated: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${GitHubInfraRepo}:ref:refs/heads/${GitHubDeployBranch}
+                  - !Sub repo:${GitHubOrg}@*/${GitHubInfraRepo}@*:ref:refs/heads/${GitHubDeployBranch}
+          - Sid: CloudFormationServiceExecution
+            Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      MaxSessionDuration: 3600
+      Policies:
+        - PolicyName: DeployNestedStack
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # ---- Packaging: upload/read child templates in S3 ----
+              - Sid: TemplatesBucketAccess
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub ${TemplatesBucket.Arn}/*
+              - Sid: TemplatesBucketList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt TemplatesBucket.Arn
+
+              # ---- CloudFormation: the root stack + its nested children
+              #      (nested stack physical names are always prefixed with
+              #      the parent's, so one wildcard covers both) ----
+              - Sid: CloudFormationStackOperations
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:ListStackResources
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:ValidateTemplate
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-${Environment}-*/*
+
+              # ---- 00-network.yaml: EC2 networking. Most of these actions
+              #      don't support resource-level ARNs (AWS limitation, not
+              #      a scoping choice), hence Resource: "*" ----
+              - Sid: NetworkEc2
+                Effect: Allow
+                Action:
+                  - ec2:DescribeAvailabilityZones
+                  - ec2:CreateVpc
+                  - ec2:DeleteVpc
+                  - ec2:DescribeVpcs
+                  - ec2:ModifyVpcAttribute
+                  - ec2:CreateSubnet
+                  - ec2:DeleteSubnet
+                  - ec2:DescribeSubnets
+                  - ec2:ModifySubnetAttribute
+                  - ec2:CreateInternetGateway
+                  - ec2:DeleteInternetGateway
+                  - ec2:AttachInternetGateway
+                  - ec2:DetachInternetGateway
+                  - ec2:DescribeInternetGateways
+                  - ec2:CreateRouteTable
+                  - ec2:DeleteRouteTable
+                  - ec2:CreateRoute
+                  - ec2:DeleteRoute
+                  - ec2:AssociateRouteTable
+                  - ec2:DisassociateRouteTable
+                  - ec2:ReplaceRouteTableAssociation
+                  - ec2:DescribeRouteTables
+                  - ec2:AllocateAddress
+                  - ec2:ReleaseAddress
+                  - ec2:DescribeAddresses
+                  - ec2:CreateNatGateway
+                  - ec2:DeleteNatGateway
+                  - ec2:DescribeNatGateways
+                  - ec2:CreateVpcEndpoint
+                  - ec2:DeleteVpcEndpoints
+                  - ec2:ModifyVpcEndpoint
+                  - ec2:DescribeVpcEndpoints
+                  - ec2:DescribeVpcEndpointServices
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - ec2:DescribeTags
+                Resource: "*"
+
+              # ---- 01-security.yaml: KMS CMK + security groups ----
+              - Sid: SecurityKms
+                Effect: Allow
+                Action:
+                  - kms:CreateKey
+                  - kms:DescribeKey
+                  - kms:EnableKeyRotation
+                  - kms:PutKeyPolicy
+                  - kms:GetKeyPolicy
+                  - kms:ScheduleKeyDeletion
+                  - kms:CancelKeyDeletion
+                  - kms:TagResource
+                  - kms:UntagResource
+                  - kms:ListResourceTags
+                  - kms:CreateAlias
+                  - kms:DeleteAlias
+                  - kms:UpdateAlias
+                  - kms:ListAliases
+                  # Required for OTHER services (RDS, ElastiCache,
+                  # Secrets Manager, ECR, CloudWatch Logs, S3) to actually
+                  # use this customer managed key, not just for
+                  # describing/managing the key resource itself.
+                  - kms:CreateGrant
+                  - kms:RevokeGrant
+                  - kms:ListGrants
+                  - kms:GenerateDataKey
+                  - kms:GenerateDataKeyWithoutPlaintext
+                  - kms:Decrypt
+                  - kms:Encrypt
+                  - kms:ReEncryptFrom
+                  - kms:ReEncryptTo
+                Resource: "*"
+              - Sid: SecurityGroups
+                Effect: Allow
+                Action:
+                  - ec2:CreateSecurityGroup
+                  - ec2:DeleteSecurityGroup
+                  - ec2:DescribeSecurityGroups
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupEgress
+                Resource: "*"
+
+              # ---- 03-database.yaml: RDS + RDS Proxy + Secrets Manager ----
+              - Sid: DatabaseRds
+                Effect: Allow
+                Action:
+                  - rds:CreateDBSubnetGroup
+                  - rds:DeleteDBSubnetGroup
+                  - rds:DescribeDBSubnetGroups
+                  - rds:CreateDBInstance
+                  - rds:DeleteDBInstance
+                  - rds:ModifyDBInstance
+                  - rds:DescribeDBInstances
+                  - rds:AddTagsToResource
+                  - rds:RemoveTagsFromResource
+                  - rds:ListTagsForResource
+                  # DBInstance has DeletionPolicy: Snapshot - deleting it (on
+                  # stack deletion/rollback) requires taking a final
+                  # snapshot first.
+                  - rds:CreateDBSnapshot
+                  - rds:DescribeDBSnapshots
+                  # RDS Proxy
+                  - rds:CreateDBProxy
+                  - rds:DeleteDBProxy
+                  - rds:ModifyDBProxy
+                  - rds:DescribeDBProxies
+                  - rds:DescribeDBProxyTargetGroups
+                  - rds:ModifyDBProxyTargetGroup
+                  - rds:RegisterDBProxyTargets
+                  - rds:DeregisterDBProxyTargets
+                  - rds:DescribeDBProxyTargets
+                Resource: "*"
+              - Sid: DatabaseSecrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:CreateSecret
+                  - secretsmanager:DeleteSecret
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:PutSecretValue
+                  - secretsmanager:UpdateSecret
+                  - secretsmanager:TagResource
+                  - secretsmanager:UntagResource
+                Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}-*
+              # GetRandomPassword isn't a resource-level action - IAM
+              # requires Resource: "*" for it.
+              - Sid: SecretsManagerGetRandomPassword
+                Effect: Allow
+                Action: secretsmanager:GetRandomPassword
+                Resource: "*"
+
+              # ---- 04-cache.yaml: ElastiCache Redis. Like EC2, most
+              #      ElastiCache actions don't support resource-level ARNs
+              #      consistently, hence Resource: "*" ----
+              - Sid: Elasticache
+                Effect: Allow
+                Action:
+                  - elasticache:CreateCacheSubnetGroup
+                  - elasticache:DeleteCacheSubnetGroup
+                  - elasticache:DescribeCacheSubnetGroups
+                  - elasticache:CreateReplicationGroup
+                  - elasticache:DeleteReplicationGroup
+                  - elasticache:ModifyReplicationGroup
+                  - elasticache:DescribeReplicationGroups
+                  - elasticache:DescribeCacheClusters
+                  - elasticache:AddTagsToResource
+                  - elasticache:RemoveTagsFromResource
+                  - elasticache:ListTagsForResource
+                Resource: "*"
+
+              # ---- 05-ecr.yaml / 06-github-oidc.yaml: ECR repo + its policy ----
+              - Sid: EcrRepository
+                Effect: Allow
+                Action:
+                  - ecr:CreateRepository
+                  - ecr:DeleteRepository
+                  - ecr:DescribeRepositories
+                  - ecr:PutLifecyclePolicy
+                  - ecr:DeleteLifecyclePolicy
+                  - ecr:PutImageScanningConfiguration
+                  - ecr:PutImageTagMutability
+                  - ecr:SetRepositoryPolicy
+                  - ecr:DeleteRepositoryPolicy
+                  - ecr:GetRepositoryPolicy
+                  - ecr:TagResource
+                  - ecr:UntagResource
+                  - ecr:ListTagsForResource
+                Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-*
+
+              # ---- IAM roles created by the nested stacks (03, 06, 07, 08, 09) ----
+              - Sid: IamRolesForStacks
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-*
+              # PassRole granted separately, per consuming service, scoped by
+              # iam:PassedToService rather than a blanket '*' - covers
+              # DBProxyRole (03), TaskExecutionRole/TaskRole (07),
+              # ScalingRole (08), CodePipelineServiceRole/
+              # CodeDeployServiceRole/EventBridgeInvokePipelineRole/
+              # MigrationProjectRole (09).
+              - Sid: PassRolesToServices
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-*
+                Condition:
+                  StringEquals:
+                    iam:PassedToService:
+                      # cloudformation.amazonaws.com: this role passing
+                      # itself, required for `aws cloudformation deploy
+                      # --role-arn` (CreateChangeSet needs iam:PassRole on
+                      # whatever --role-arn names, even when it's the same
+                      # role as the caller).
+                      - cloudformation.amazonaws.com
+                      - rds.amazonaws.com
+                      - ecs-tasks.amazonaws.com
+                      - application-autoscaling.amazonaws.com
+                      - codepipeline.amazonaws.com
+                      - codedeploy.amazonaws.com
+                      - codebuild.amazonaws.com
+                      - events.amazonaws.com
+
+              # ---- 07-ecs-alb.yaml: ALB, ECS, CloudWatch Logs, S3 access-logs bucket ----
+              - Sid: EcsAlb
+                Effect: Allow
+                Action:
+                  - elasticloadbalancing:CreateLoadBalancer
+                  - elasticloadbalancing:DeleteLoadBalancer
+                  - elasticloadbalancing:DescribeLoadBalancers
+                  - elasticloadbalancing:ModifyLoadBalancerAttributes
+                  - elasticloadbalancing:DescribeLoadBalancerAttributes
+                  - elasticloadbalancing:CreateTargetGroup
+                  - elasticloadbalancing:DeleteTargetGroup
+                  - elasticloadbalancing:DescribeTargetGroups
+                  - elasticloadbalancing:ModifyTargetGroup
+                  - elasticloadbalancing:ModifyTargetGroupAttributes
+                  - elasticloadbalancing:DescribeTargetGroupAttributes
+                  - elasticloadbalancing:DescribeTargetHealth
+                  - elasticloadbalancing:CreateListener
+                  - elasticloadbalancing:DeleteListener
+                  - elasticloadbalancing:DescribeListeners
+                  - elasticloadbalancing:ModifyListener
+                  - elasticloadbalancing:AddTags
+                  - elasticloadbalancing:RemoveTags
+                  - elasticloadbalancing:DescribeTags
+                  - ecs:CreateCluster
+                  - ecs:DeleteCluster
+                  - ecs:DescribeClusters
+                  - ecs:PutClusterCapacityProviders
+                  - ecs:RegisterTaskDefinition
+                  - ecs:DeregisterTaskDefinition
+                  - ecs:DescribeTaskDefinition
+                  - ecs:CreateService
+                  - ecs:UpdateService
+                  - ecs:DeleteService
+                  - ecs:DescribeServices
+                  - ecs:TagResource
+                  - ecs:UntagResource
+                Resource: "*"
+              - Sid: EcsAlbLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                  - logs:DescribeLogGroups
+                  - logs:PutRetentionPolicy
+                  - logs:AssociateKmsKey
+                  - logs:TagResource
+                  - logs:TagLogGroup
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${ProjectName}-*
+              - Sid: S3Buckets
+                Effect: Allow
+                Action:
+                  - s3:CreateBucket
+                  - s3:DeleteBucket
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutBucketVersioning
+                  - s3:PutEncryptionConfiguration
+                  - s3:GetEncryptionConfiguration
+                  - s3:PutLifecycleConfiguration
+                  - s3:PutBucketPolicy
+                  - s3:DeleteBucketPolicy
+                  - s3:GetBucketPolicy
+                  - s3:PutBucketOwnershipControls
+                  - s3:PutBucketAcl
+                  - s3:GetBucketAcl
+                  - s3:PutBucketTagging
+                  - s3:GetBucketTagging
+                  - s3:TagResource
+                  - s3:UntagResource
+                  - s3:ListTagsForResource
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::${ProjectName}-*
+
+              # ---- 08-autoscaling.yaml: Application Auto Scaling ----
+              - Sid: Autoscaling
+                Effect: Allow
+                Action:
+                  - application-autoscaling:RegisterScalableTarget
+                  - application-autoscaling:DeregisterScalableTarget
+                  - application-autoscaling:DescribeScalableTargets
+                  - application-autoscaling:PutScalingPolicy
+                  - application-autoscaling:DeleteScalingPolicy
+                  - application-autoscaling:DescribeScalingPolicies
+                Resource: "*"
+              # First ScalableTarget in the account auto-creates this
+              # service-linked role.
+              - Sid: EcsAutoscalingServiceLinkedRole
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: ecs.application-autoscaling.amazonaws.com
+              # 07-ecs-alb.yaml: the first ECS service in the account/region
+              # integrated with a load balancer auto-creates this
+              # service-linked role too (separate from the autoscaling one
+              # above).
+              - Sid: EcsServiceLinkedRole
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: ecs.amazonaws.com
+
+              # ---- 09-cicd-pipeline.yaml: CodeStar Connections,
+              #      CodePipeline, CodeBuild (migration stage), CodeDeploy,
+              #      EventBridge, CloudWatch alarms ----
+              - Sid: CicdPipeline
+                Effect: Allow
+                Action:
+                  - codestar-connections:CreateConnection
+                  - codestar-connections:DeleteConnection
+                  - codestar-connections:GetConnection
+                  - codestar-connections:TagResource
+                  - codestar-connections:PassConnection
+                  - codepipeline:CreatePipeline
+                  - codepipeline:DeletePipeline
+                  - codepipeline:GetPipeline
+                  - codepipeline:UpdatePipeline
+                  - codepipeline:TagResource
+                  - codebuild:CreateProject
+                  - codebuild:UpdateProject
+                  - codebuild:DeleteProject
+                  - codebuild:BatchGetProjects
+                  - codedeploy:CreateApplication
+                  - codedeploy:DeleteApplication
+                  - codedeploy:GetApplication
+                  - codedeploy:CreateDeploymentGroup
+                  - codedeploy:DeleteDeploymentGroup
+                  - codedeploy:GetDeploymentGroup
+                  - codedeploy:UpdateDeploymentGroup
+                  - codedeploy:TagResource
+                  - events:PutRule
+                  - events:DeleteRule
+                  - events:DescribeRule
+                  - events:PutTargets
+                  - events:RemoveTargets
+                  - cloudwatch:PutMetricAlarm
+                  - cloudwatch:DeleteAlarms
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:TagResource
+                Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-github-actions-cfn-deploy
+
+Outputs:
+  TemplatesBucketName:
+    Value: !Ref TemplatesBucket
+    Description: Pass to `aws cloudformation package --s3-bucket`.
+
+  InfraDeployRoleArn:
+    Value: !GetAtt InfraDeployRole.Arn
+    Description: >
+      Put this in .github/workflows/*.yml as the role-to-assume, and pass it
+      to `aws cloudformation deploy --role-arn` too.

@@ -1,0 +1,405 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  To-Do App - root nested-stack template. Owns all 9 child stacks (network,
+  security, vpc-endpoints, database, cache, github-oidc, ecr, ecs-alb,
+  autoscaling, cicd-pipeline) as AWS::CloudFormation::Stack resources,
+  wiring cross-stack values via !GetAtt instead of Fn::Export/Fn::ImportValue.
+  This is a single flat nesting (no intermediate grouping stacks) because
+  the dependency graph crosses too many boundaries for grouping to pay for
+  itself - see EcsAlbStack below, which pulls from network, security,
+  database and cache all at once.
+  DEPLOYED BY: .github/workflows/deploy-root-stack.yml, which packages this
+  file to S3 and runs `aws cloudformation deploy` in the same job run - the
+  packaged template is never written into the repo or committed anywhere,
+  it exists only as a local file inside that job. Not Git-sync-deployed.
+  PREREQUISITE: templates/bootstrap.yaml must already be deployed - it is
+  not part of this nested-stack tree and is never superseded by it.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: md6-todo
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  # ---- network ----
+  VpcCidr:
+    Type: String
+    Default: 10.30.0.0/16
+
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.30.0.0/24
+
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.30.1.0/24
+
+  AppSubnet1Cidr:
+    Type: String
+    Default: 10.30.10.0/24
+
+  AppSubnet2Cidr:
+    Type: String
+    Default: 10.30.11.0/24
+
+  DataSubnet1Cidr:
+    Type: String
+    Default: 10.30.20.0/24
+
+  DataSubnet2Cidr:
+    Type: String
+    Default: 10.30.21.0/24
+
+  CacheSubnet1Cidr:
+    Type: String
+    Default: 10.30.30.0/24
+
+  CacheSubnet2Cidr:
+    Type: String
+    Default: 10.30.31.0/24
+
+  EnableNatGateway:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+  # ---- security / ecs-alb shared ----
+  ContainerPort:
+    Type: Number
+    Default: 8000
+
+  TestListenerPort:
+    Type: Number
+    Default: 8080
+
+  # ---- database ----
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t3.small, db.t3.medium]
+
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+
+  DBEngineVersion:
+    Type: String
+    Default: "16.4"
+
+  DBName:
+    Type: String
+    Default: todoapp
+
+  DBMultiAZ:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+  DBDeletionProtection:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+  DBBackupRetentionDays:
+    Type: Number
+    Default: 7
+
+  # ---- cache ----
+  CacheNodeType:
+    Type: String
+    Default: cache.t3.micro
+
+  NumCacheClusters:
+    Type: Number
+    Default: 1
+
+  # ---- github-oidc / cicd-pipeline shared ----
+  GitHubOrg:
+    Type: String
+    Description: GitHub org or username that owns the application repo.
+
+  GitHubAppRepo:
+    Type: String
+    Default: md6-app-repo
+
+  GitHubDeployBranch:
+    Type: String
+    Default: main
+
+  CreateOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "false" if bootstrap.yaml (or another project's bootstrap in
+      this same account) already created the
+      token.actions.githubusercontent.com OIDC provider (an account can
+      only have one).
+
+  # ---- ecs-alb ----
+  TaskCpu:
+    Type: String
+    Default: "512"
+    AllowedValues: ["256", "512", "1024"]
+
+  TaskMemory:
+    Type: String
+    Default: "1024"
+    AllowedValues: ["512", "1024", "2048"]
+
+  ContainerImage:
+    Type: String
+    Default: public.ecr.aws/docker/library/httpd:2.4
+
+  DjangoAllowedHosts:
+    Type: String
+    Default: "*"
+
+  # ---- autoscaling ----
+  MinCapacity:
+    Type: Number
+    Default: 1
+
+  MaxCapacity:
+    Type: Number
+    Default: 4
+
+  CpuTargetValue:
+    Type: Number
+    Default: 60
+
+  # ---- cicd-pipeline ----
+  DeploymentTimeoutMinutes:
+    Type: Number
+    Default: 15
+
+Resources:
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./stacks/00-network.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        VpcCidr: !Ref VpcCidr
+        PublicSubnet1Cidr: !Ref PublicSubnet1Cidr
+        PublicSubnet2Cidr: !Ref PublicSubnet2Cidr
+        AppSubnet1Cidr: !Ref AppSubnet1Cidr
+        AppSubnet2Cidr: !Ref AppSubnet2Cidr
+        DataSubnet1Cidr: !Ref DataSubnet1Cidr
+        DataSubnet2Cidr: !Ref DataSubnet2Cidr
+        CacheSubnet1Cidr: !Ref CacheSubnet1Cidr
+        CacheSubnet2Cidr: !Ref CacheSubnet2Cidr
+        EnableNatGateway: !Ref EnableNatGateway
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-network
+
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./stacks/01-security.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        ContainerPort: !Ref ContainerPort
+        TestListenerPort: !Ref TestListenerPort
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        VpcCidr: !GetAtt NetworkStack.Outputs.VpcCidr
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-security
+
+  VpcEndpointsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./stacks/02-vpc-endpoints.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        AppSubnet1Id: !GetAtt NetworkStack.Outputs.AppSubnet1Id
+        AppSubnet2Id: !GetAtt NetworkStack.Outputs.AppSubnet2Id
+        DataSubnet1Id: !GetAtt NetworkStack.Outputs.DataSubnet1Id
+        DataSubnet2Id: !GetAtt NetworkStack.Outputs.DataSubnet2Id
+        VpcEndpointsSecurityGroupId: !GetAtt SecurityStack.Outputs.VpcEndpointsSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpc-endpoints
+
+  DatabaseStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./stacks/03-database.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        DBInstanceClass: !Ref DBInstanceClass
+        DBAllocatedStorage: !Ref DBAllocatedStorage
+        DBEngineVersion: !Ref DBEngineVersion
+        DBName: !Ref DBName
+        DBMultiAZ: !Ref DBMultiAZ
+        DBDeletionProtection: !Ref DBDeletionProtection
+        DBBackupRetentionDays: !Ref DBBackupRetentionDays
+        DataSubnet1Id: !GetAtt NetworkStack.Outputs.DataSubnet1Id
+        DataSubnet2Id: !GetAtt NetworkStack.Outputs.DataSubnet2Id
+        AppKmsKeyId: !GetAtt SecurityStack.Outputs.AppKmsKeyId
+        AppKmsKeyArn: !GetAtt SecurityStack.Outputs.AppKmsKeyArn
+        DbSecurityGroupId: !GetAtt SecurityStack.Outputs.DbSecurityGroupId
+        ProxySecurityGroupId: !GetAtt SecurityStack.Outputs.ProxySecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-database
+
+  CacheStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./stacks/04-cache.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        CacheNodeType: !Ref CacheNodeType
+        NumCacheClusters: !Ref NumCacheClusters
+        CacheSubnet1Id: !GetAtt NetworkStack.Outputs.CacheSubnet1Id
+        CacheSubnet2Id: !GetAtt NetworkStack.Outputs.CacheSubnet2Id
+        CacheSecurityGroupId: !GetAtt SecurityStack.Outputs.CacheSecurityGroupId
+        AppKmsKeyArn: !GetAtt SecurityStack.Outputs.AppKmsKeyArn
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cache
+
+  GithubOidcStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./stacks/06-github-oidc.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        GitHubOrg: !Ref GitHubOrg
+        GitHubAppRepo: !Ref GitHubAppRepo
+        GitHubDeployBranch: !Ref GitHubDeployBranch
+        CreateOidcProvider: !Ref CreateOidcProvider
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-github-oidc
+
+  EcrStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./stacks/05-ecr.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        AppKmsKeyArn: !GetAtt SecurityStack.Outputs.AppKmsKeyArn
+        GitHubActionsRoleArn: !GetAtt GithubOidcStack.Outputs.GitHubActionsRoleArn
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-ecr
+
+  EcsAlbStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./stacks/07-ecs-alb.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        ContainerPort: !Ref ContainerPort
+        TestListenerPort: !Ref TestListenerPort
+        TaskCpu: !Ref TaskCpu
+        TaskMemory: !Ref TaskMemory
+        ContainerImage: !Ref ContainerImage
+        DjangoAllowedHosts: !Ref DjangoAllowedHosts
+        VpcId: !GetAtt NetworkStack.Outputs.VpcId
+        PublicSubnet1Id: !GetAtt NetworkStack.Outputs.PublicSubnet1Id
+        PublicSubnet2Id: !GetAtt NetworkStack.Outputs.PublicSubnet2Id
+        AppSubnet1Id: !GetAtt NetworkStack.Outputs.AppSubnet1Id
+        AppSubnet2Id: !GetAtt NetworkStack.Outputs.AppSubnet2Id
+        AlbSecurityGroupId: !GetAtt SecurityStack.Outputs.AlbSecurityGroupId
+        AppSecurityGroupId: !GetAtt SecurityStack.Outputs.AppSecurityGroupId
+        AppKmsKeyId: !GetAtt SecurityStack.Outputs.AppKmsKeyId
+        AppKmsKeyArn: !GetAtt SecurityStack.Outputs.AppKmsKeyArn
+        DBProxyEndpoint: !GetAtt DatabaseStack.Outputs.DBProxyEndpoint
+        DBName: !GetAtt DatabaseStack.Outputs.DBName
+        DBCredentialsSecretArn: !GetAtt DatabaseStack.Outputs.DBCredentialsSecretArn
+        CacheEndpointAddress: !GetAtt CacheStack.Outputs.CacheEndpointAddress
+        CacheEndpointPort: !GetAtt CacheStack.Outputs.CacheEndpointPort
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-ecs-alb
+
+  AutoscalingStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./stacks/08-autoscaling.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        MinCapacity: !Ref MinCapacity
+        MaxCapacity: !Ref MaxCapacity
+        CpuTargetValue: !Ref CpuTargetValue
+        EcsClusterName: !GetAtt EcsAlbStack.Outputs.EcsClusterName
+        EcsServiceName: !GetAtt EcsAlbStack.Outputs.EcsServiceName
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-autoscaling
+
+  CicdPipelineStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./stacks/09-cicd-pipeline.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        GitHubOrg: !Ref GitHubOrg
+        GitHubAppRepo: !Ref GitHubAppRepo
+        GitHubDeployBranch: !Ref GitHubDeployBranch
+        DeploymentTimeoutMinutes: !Ref DeploymentTimeoutMinutes
+        AppKmsKeyArn: !GetAtt SecurityStack.Outputs.AppKmsKeyArn
+        EcrRepositoryName: !GetAtt EcrStack.Outputs.RepositoryName
+        EcrRepositoryArn: !GetAtt EcrStack.Outputs.RepositoryArn
+        AlbFullName: !GetAtt EcsAlbStack.Outputs.AlbFullName
+        BlueTargetGroupFullName: !GetAtt EcsAlbStack.Outputs.BlueTargetGroupFullName
+        GreenTargetGroupFullName: !GetAtt EcsAlbStack.Outputs.GreenTargetGroupFullName
+        BlueTargetGroupName: !GetAtt EcsAlbStack.Outputs.BlueTargetGroupName
+        GreenTargetGroupName: !GetAtt EcsAlbStack.Outputs.GreenTargetGroupName
+        ProdListenerArn: !GetAtt EcsAlbStack.Outputs.ProdListenerArn
+        TestListenerArn: !GetAtt EcsAlbStack.Outputs.TestListenerArn
+        EcsClusterName: !GetAtt EcsAlbStack.Outputs.EcsClusterName
+        EcsServiceName: !GetAtt EcsAlbStack.Outputs.EcsServiceName
+        TaskDefinitionFamily: !GetAtt EcsAlbStack.Outputs.TaskDefinitionFamily
+        TaskExecutionRoleArn: !GetAtt EcsAlbStack.Outputs.TaskExecutionRoleArn
+        TaskRoleArn: !GetAtt EcsAlbStack.Outputs.TaskRoleArn
+        AppSubnet1Id: !GetAtt NetworkStack.Outputs.AppSubnet1Id
+        AppSubnet2Id: !GetAtt NetworkStack.Outputs.AppSubnet2Id
+        AppSecurityGroupId: !GetAtt SecurityStack.Outputs.AppSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cicd-pipeline
+
+Outputs:
+  AlbDnsName:
+    Value: !GetAtt EcsAlbStack.Outputs.AlbDnsName
+
+  EcrRepositoryUri:
+    Value: !GetAtt EcrStack.Outputs.RepositoryUri
+
+  GitHubActionsRoleArn:
+    Value: !GetAtt GithubOidcStack.Outputs.GitHubActionsRoleArn
+    Description: Put this in the app repo's GitHub Actions workflow as the role-to-assume.
+
+  AppRepoConnectionArn:
+    Value: !GetAtt CicdPipelineStack.Outputs.AppRepoConnectionArn
+    Description: >
+      Open CodeConnections in the console once and complete the GitHub
+      authorization handshake for this connection before the pipeline can
+      pull source.
+
+  DBProxyEndpoint:
+    Value: !GetAtt DatabaseStack.Outputs.DBProxyEndpoint
+
+  CacheEndpointAddress:
+    Value: !GetAtt CacheStack.Outputs.CacheEndpointAddress

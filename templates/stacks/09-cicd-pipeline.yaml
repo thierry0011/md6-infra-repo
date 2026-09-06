@@ -1,0 +1,578 @@
+# ECR tagging/trigger design (deliberately not a copy of the simpler
+# mutable-"latest" pattern some references use): the ECR repository
+# (05-ecr.yaml) is ImageTagMutability: IMMUTABLE, so CI pushes exactly one
+# unique tag per build and never reuses a tag - there is no "latest" to
+# filter on. CodePipeline's native ECR source action always watches one
+# fixed, statically-configured tag (defaults to "latest" if omitted -
+# confirmed against AWS's own action-reference-ECR docs), so the
+# EventBridge rule below has NO image-tag filter at all (fires on every
+# successful push, any tag) and its target carries an InputTransformer that
+# maps the actual pushed image's digest ($.detail.image-digest) into a
+# sourceRevisions override on StartPipelineExecution, pinning the pipeline
+# run to that exact digest regardless of the source action's static tag
+# config - a documented AWS pattern (create-cwe-ecr-source-cfn.md), not a
+# workaround.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  To-Do App - Blue/green deployment pipeline. An EventBridge rule detects
+  every successful image push to ECR (no tag filter - see comment above)
+  and starts CodePipeline, which runs a one-off database migration via
+  CodeBuild, then pulls the deploy files (ecs/taskdef.json,
+  ecs/appspec.yaml) from the application repo and hands off to CodeDeploy
+  for an ECS blue/green traffic shift between the two ALB target groups.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: md6-todo
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  GitHubOrg:
+    Type: String
+    Description: GitHub org/username that owns the application repository.
+
+  GitHubAppRepo:
+    Type: String
+    Default: md6-app-repo
+    Description: Application repository name.
+
+  GitHubDeployBranch:
+    Type: String
+    Default: main
+
+  DeploymentTimeoutMinutes:
+    Type: Number
+    Default: 15
+    Description: Minutes CodeDeploy waits for the old (blue) task set to be terminated after traffic shifts.
+
+  AppKmsKeyArn:
+    Type: String
+    Description: Shared CMK ARN from the security stack.
+
+  EcrRepositoryName:
+    Type: String
+    Description: ECR repository name from the ecr stack.
+
+  EcrRepositoryArn:
+    Type: String
+    Description: ECR repository ARN from the ecr stack.
+
+  AlbFullName:
+    Type: String
+    Description: ALB full name from the ecs-alb stack.
+
+  BlueTargetGroupFullName:
+    Type: String
+    Description: Blue target group full name from the ecs-alb stack.
+
+  GreenTargetGroupFullName:
+    Type: String
+    Description: Green target group full name from the ecs-alb stack.
+
+  BlueTargetGroupName:
+    Type: String
+    Description: Blue target group name from the ecs-alb stack.
+
+  GreenTargetGroupName:
+    Type: String
+    Description: Green target group name from the ecs-alb stack.
+
+  ProdListenerArn:
+    Type: String
+    Description: Production listener ARN from the ecs-alb stack.
+
+  TestListenerArn:
+    Type: String
+    Description: Test listener ARN from the ecs-alb stack.
+
+  EcsClusterName:
+    Type: String
+    Description: ECS cluster name from the ecs-alb stack.
+
+  EcsServiceName:
+    Type: String
+    Description: ECS service name from the ecs-alb stack.
+
+  TaskDefinitionFamily:
+    Type: String
+    Description: ECS task definition family from the ecs-alb stack (used by the migration step).
+
+  TaskExecutionRoleArn:
+    Type: String
+    Description: ECS task execution role ARN from the ecs-alb stack.
+
+  TaskRoleArn:
+    Type: String
+    Description: ECS task role ARN from the ecs-alb stack.
+
+  AppSubnet1Id:
+    Type: String
+    Description: App subnet 1 id from the network stack (migration task network placement).
+
+  AppSubnet2Id:
+    Type: String
+    Description: App subnet 2 id from the network stack.
+
+  AppSecurityGroupId:
+    Type: String
+    Description: App security group id from the security stack (migration task network placement).
+
+Resources:
+  # ---------------- Connection to the application repository ----------------
+  # After creation, open the CodeConnections console once to complete the
+  # GitHub authorization handshake for this connection (one-time, manual,
+  # unavoidable step for any CodeStar/CodeConnections integration).
+  AppRepoConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: !Sub ${ProjectName}-${Environment}-app-repo
+      ProviderType: GitHub
+
+  # ---------------- Artifact bucket ----------------
+  PipelineArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${ProjectName}-${Environment}-pipeline-artifacts-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref AppKmsKeyArn
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 7
+
+  # ---------------- Database migration (runs before traffic ever shifts) ----------------
+  MigrationProjectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-migration-codebuild
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunMigrationTask
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: RunAndDescribeTask
+                Effect: Allow
+                Action:
+                  - ecs:RunTask
+                  - ecs:DescribeTasks
+                  - ecs:DescribeTaskDefinition
+                Resource: "*"
+              - Sid: PassEcsRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Ref TaskExecutionRoleArn
+                  - !Ref TaskRoleArn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+              - Sid: CodeBuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ProjectName}-${Environment}-migrate*
+              - Sid: ArtifactBucketRead
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub ${PipelineArtifactBucket.Arn}/*
+              - Sid: KmsForArtifacts
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Ref AppKmsKeyArn
+
+  MigrationProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-migrate
+      Description: Runs `python manage.py migrate` as a one-off Fargate task before CodeDeploy shifts traffic.
+      ServiceRole: !GetAtt MigrationProjectRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - yum install -y jq >/dev/null
+            build:
+              commands:
+                - IMAGE_URI=$(jq -r '.ImageURI' imageDetail.json)
+                - echo "Running migrations against image $IMAGE_URI"
+                - >
+                  TASK_ARN=$(aws ecs run-task
+                  --cluster ${EcsClusterName}
+                  --task-definition ${TaskDefinitionFamily}
+                  --launch-type FARGATE
+                  --network-configuration "awsvpcConfiguration={subnets=[${AppSubnet1Id},${AppSubnet2Id}],securityGroups=[${AppSecurityGroupId}],assignPublicIp=DISABLED}"
+                  --overrides "{\"containerOverrides\":[{\"name\":\"app\",\"image\":\"$IMAGE_URI\",\"command\":[\"python\",\"manage.py\",\"migrate\",\"--noinput\"]}]}"
+                  --query 'tasks[0].taskArn' --output text)
+                - echo "Migration task: $TASK_ARN"
+                - aws ecs wait tasks-stopped --cluster ${EcsClusterName} --tasks "$TASK_ARN"
+                - >
+                  EXIT_CODE=$(aws ecs describe-tasks --cluster ${EcsClusterName} --tasks "$TASK_ARN"
+                  --query 'tasks[0].containers[0].exitCode' --output text)
+                - echo "Migration task exit code: $EXIT_CODE"
+                - test "$EXIT_CODE" = "0"
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+      TimeoutInMinutes: 15
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-migrate
+
+  # ---------------- CodeDeploy (ECS blue/green) ----------------
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-codedeploy-ecs
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
+
+  BlueTargetGroupUnhealthyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-blue-tg-unhealthy
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Ref BlueTargetGroupFullName
+        - Name: LoadBalancer
+          Value: !Ref AlbFullName
+
+  GreenTargetGroupUnhealthyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${Environment}-green-tg-unhealthy
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: TargetGroup
+          Value: !Ref GreenTargetGroupFullName
+        - Name: LoadBalancer
+          Value: !Ref AlbFullName
+
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub ${ProjectName}-${Environment}-app
+      ComputePlatform: ECS
+
+  CodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub ${ProjectName}-${Environment}-dg
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+          - DEPLOYMENT_STOP_ON_ALARM
+      AlarmConfiguration:
+        Enabled: true
+        Alarms:
+          - Name: !Ref BlueTargetGroupUnhealthyAlarm
+          - Name: !Ref GreenTargetGroupUnhealthyAlarm
+      BlueGreenDeploymentConfiguration:
+        TerminateBlueInstancesOnDeploymentSuccess:
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: !Ref DeploymentTimeoutMinutes
+        DeploymentReadyOption:
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      ECSServices:
+        - ClusterName: !Ref EcsClusterName
+          ServiceName: !Ref EcsServiceName
+      LoadBalancerInfo:
+        TargetGroupPairInfoList:
+          - ProdTrafficRoute:
+              ListenerArns:
+                - !Ref ProdListenerArn
+            TestTrafficRoute:
+              ListenerArns:
+                - !Ref TestListenerArn
+            TargetGroups:
+              - Name: !Ref BlueTargetGroupName
+              - Name: !Ref GreenTargetGroupName
+
+  # ---------------- CodePipeline ----------------
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-codepipeline
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipelinePermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ArtifactBucketAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                Resource:
+                  - !GetAtt PipelineArtifactBucket.Arn
+                  - !Sub ${PipelineArtifactBucket.Arn}/*
+              - Sid: KmsForArtifacts
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref AppKmsKeyArn
+              - Sid: UseAppRepoConnection
+                Effect: Allow
+                Action: codestar-connections:UseConnection
+                Resource: !Ref AppRepoConnection
+              - Sid: EcrSourceAction
+                Effect: Allow
+                Action:
+                  - ecr:DescribeImages
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: !Ref EcrRepositoryArn
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: RunMigrationBuild
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: !GetAtt MigrationProject.Arn
+              - Sid: CodeDeployDrive
+                Effect: Allow
+                Action:
+                  - codedeploy:CreateDeployment
+                  - codedeploy:GetApplication
+                  - codedeploy:GetApplicationRevision
+                  - codedeploy:GetDeployment
+                  - codedeploy:GetDeploymentConfig
+                  - codedeploy:RegisterApplicationRevision
+                Resource: "*"
+              - Sid: EcsAndPassRole
+                Effect: Allow
+                Action:
+                  - ecs:RegisterTaskDefinition
+                  - ecs:DescribeTaskDefinition
+                Resource: "*"
+              - Sid: PassEcsRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Ref TaskExecutionRoleArn
+                  - !Ref TaskRoleArn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ecs-tasks.amazonaws.com
+
+  AppPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-pipeline
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineArtifactBucket
+        EncryptionKey:
+          Type: KMS
+          Id: !Ref AppKmsKeyArn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: AppSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref AppRepoConnection
+                FullRepositoryId: !Sub ${GitHubOrg}/${GitHubAppRepo}
+                BranchName: !Ref GitHubDeployBranch
+                DetectChanges: "false"
+              OutputArtifacts:
+                - Name: AppSourceOutput
+              RunOrder: 1
+            - Name: ImageSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: ECR
+                Version: "1"
+              Configuration:
+                # Static placeholder only - every execution here is started
+                # with a sourceRevisions override (see EcrPushRule below)
+                # that pins the actual digest just pushed, so this value is
+                # never what actually gets deployed.
+                ImageTag: latest
+                RepositoryName: !Ref EcrRepositoryName
+              OutputArtifacts:
+                - Name: ImageSourceOutput
+              RunOrder: 1
+        - Name: Migrate
+          Actions:
+            - Name: RunDatabaseMigration
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              InputArtifacts:
+                - Name: ImageSourceOutput
+              Configuration:
+                ProjectName: !Ref MigrationProject
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - Name: DeployToECS
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeployToECS
+                Version: "1"
+              InputArtifacts:
+                - Name: AppSourceOutput
+                - Name: ImageSourceOutput
+              Configuration:
+                ApplicationName: !Ref CodeDeployApplication
+                DeploymentGroupName: !Ref CodeDeployDeploymentGroup
+                TaskDefinitionTemplateArtifact: AppSourceOutput
+                TaskDefinitionTemplatePath: ecs/taskdef.json
+                AppSpecTemplateArtifact: AppSourceOutput
+                AppSpecTemplatePath: ecs/appspec.yaml
+                Image1ArtifactName: ImageSourceOutput
+                Image1ContainerName: IMAGE1_NAME
+              RunOrder: 1
+
+  # ---------------- EventBridge: any successful ECR push -> start pipeline pinned to that digest ----------------
+  EventBridgeInvokePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-eventbridge-pipeline
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartPipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: codepipeline:StartPipelineExecution
+                Resource: !Sub arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${AppPipeline}
+
+  EcrPushRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-ecr-push-trigger
+      Description: >
+        Starts the deployment pipeline on every successful image push to
+        ECR, regardless of tag, pinning the run to the exact digest pushed.
+      EventPattern:
+        source: [aws.ecr]
+        detail-type: ["ECR Image Action"]
+        detail:
+          action-type: [PUSH]
+          result: [SUCCESS]
+          repository-name:
+            - !Ref EcrRepositoryName
+      State: ENABLED
+      Targets:
+        - Id: StartCodePipeline
+          Arn: !Sub arn:${AWS::Partition}:codepipeline:${AWS::Region}:${AWS::AccountId}:${AppPipeline}
+          RoleArn: !GetAtt EventBridgeInvokePipelineRole.Arn
+          InputTransformer:
+            InputPathsMap:
+              revisionValue: "$.detail.image-digest"
+            InputTemplate: |
+              {"sourceRevisions": [{"actionName": "ImageSource", "revisionType": "IMAGE_DIGEST", "revisionValue": "<revisionValue>"}]}
+
+Outputs:
+  AppRepoConnectionArn:
+    Value: !Ref AppRepoConnection
+    Description: >
+      Open CodeConnections in the console once and complete the GitHub
+      authorization handshake for this connection before the pipeline can
+      pull source.
+
+  PipelineName:
+    Value: !Ref AppPipeline
+
+  CodeDeployApplicationName:
+    Value: !Ref CodeDeployApplication
+
+  CodeDeployDeploymentGroupName:
+    Value: !Ref CodeDeployDeploymentGroup
+
+  MigrationProjectName:
+    Value: !Ref MigrationProject

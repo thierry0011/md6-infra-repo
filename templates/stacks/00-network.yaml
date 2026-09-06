@@ -1,0 +1,395 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  To-Do App - Multi-AZ network foundation: VPC with four dedicated subnet
+  tiers (public/ALB, app/ECS, data/RDS+Proxy, cache/ElastiCache) x 2 AZ,
+  routing, optional NAT for the app tier only, and the S3 gateway endpoint.
+  The data and cache tiers never get an internet route of any kind, NAT
+  included - they are reached only from inside the VPC.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: md6-todo
+    Description: Prefix used for resource names and tags.
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  VpcCidr:
+    Type: String
+    Default: 10.30.0.0/16
+
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.30.0.0/24
+
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.30.1.0/24
+
+  AppSubnet1Cidr:
+    Type: String
+    Default: 10.30.10.0/24
+
+  AppSubnet2Cidr:
+    Type: String
+    Default: 10.30.11.0/24
+
+  DataSubnet1Cidr:
+    Type: String
+    Default: 10.30.20.0/24
+
+  DataSubnet2Cidr:
+    Type: String
+    Default: 10.30.21.0/24
+
+  CacheSubnet1Cidr:
+    Type: String
+    Default: 10.30.30.0/24
+
+  CacheSubnet2Cidr:
+    Type: String
+    Default: 10.30.31.0/24
+
+  EnableNatGateway:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Cost/security decision: with S3, ECR, CloudWatch Logs and Secrets
+      Manager VPC endpoints in place, ECS tasks never need general internet
+      egress, so NAT Gateways (~$32/mo + data processing, each) can stay off
+      by default. Only ever applies to the app tier - the data and cache
+      tiers have no internet route regardless of this setting. Flip to
+      "true" only if the app needs arbitrary outbound internet access.
+
+Conditions:
+  CreateNatGateway: !Equals [!Ref EnableNatGateway, "true"]
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpc
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref Environment
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-igw
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ---------------- Public subnets (ALB) ----------------
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-1
+        - Key: Tier
+          Value: public
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-2
+        - Key: Tier
+          Value: public
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ---------------- App subnets (ECS) - only tier that can ever get NAT ----------------
+  AppSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref AppSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-app-1
+        - Key: Tier
+          Value: app
+
+  AppSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref AppSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-app-2
+        - Key: Tier
+          Value: app
+
+  AppRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-app-rt-1
+
+  AppRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-app-rt-2
+
+  AppSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnet1
+      RouteTableId: !Ref AppRouteTable1
+
+  AppSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnet2
+      RouteTableId: !Ref AppRouteTable2
+
+  # ---------------- Data subnets (RDS + RDS Proxy) - no internet route, ever ----------------
+  DataSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref DataSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-data-1
+        - Key: Tier
+          Value: data
+
+  DataSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref DataSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-data-2
+        - Key: Tier
+          Value: data
+
+  DataRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-data-rt
+
+  DataSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DataSubnet1
+      RouteTableId: !Ref DataRouteTable
+
+  DataSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DataSubnet2
+      RouteTableId: !Ref DataRouteTable
+
+  # ---------------- Cache subnets (ElastiCache) - no internet route, ever ----------------
+  CacheSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref CacheSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cache-1
+        - Key: Tier
+          Value: cache
+
+  CacheSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref CacheSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cache-2
+        - Key: Tier
+          Value: cache
+
+  CacheRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cache-rt
+
+  CacheSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref CacheSubnet1
+      RouteTableId: !Ref CacheRouteTable
+
+  CacheSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref CacheSubnet2
+      RouteTableId: !Ref CacheRouteTable
+
+  # ---------------- Optional NAT (off by default, app tier only) ----------------
+  NatGateway1Eip:
+    Type: AWS::EC2::EIP
+    Condition: CreateNatGateway
+    Properties:
+      Domain: vpc
+
+  NatGateway2Eip:
+    Type: AWS::EC2::EIP
+    Condition: CreateNatGateway
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateNatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1Eip.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-nat-1
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateNatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway2Eip.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-nat-2
+
+  AppRoute1:
+    Type: AWS::EC2::Route
+    Condition: CreateNatGateway
+    Properties:
+      RouteTableId: !Ref AppRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  AppRoute2:
+    Type: AWS::EC2::Route
+    Condition: CreateNatGateway
+    Properties:
+      RouteTableId: !Ref AppRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  # ---------------- S3 Gateway endpoint (free, attaches to route tables) ----------------
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !Ref AppRouteTable1
+        - !Ref AppRouteTable2
+        - !Ref DataRouteTable
+        - !Ref CacheRouteTable
+
+Outputs:
+  VpcId:
+    Value: !Ref VPC
+
+  VpcCidr:
+    Value: !Ref VpcCidr
+
+  PublicSubnet1Id:
+    Value: !Ref PublicSubnet1
+
+  PublicSubnet2Id:
+    Value: !Ref PublicSubnet2
+
+  AppSubnet1Id:
+    Value: !Ref AppSubnet1
+
+  AppSubnet2Id:
+    Value: !Ref AppSubnet2
+
+  DataSubnet1Id:
+    Value: !Ref DataSubnet1
+
+  DataSubnet2Id:
+    Value: !Ref DataSubnet2
+
+  CacheSubnet1Id:
+    Value: !Ref CacheSubnet1
+
+  CacheSubnet2Id:
+    Value: !Ref CacheSubnet2

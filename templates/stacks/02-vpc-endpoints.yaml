@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  To-Do App - Interface VPC endpoints so ECS tasks (app subnets) and the RDS
+  Proxy (data subnets) can reach ECR, CloudWatch Logs and Secrets Manager
+  without a NAT Gateway. The S3 gateway endpoint lives in 00-network.yaml
+  (gateway endpoints attach to route tables, not subnets).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: md6-todo
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  VpcId:
+    Type: String
+    Description: VPC id from the network stack.
+
+  AppSubnet1Id:
+    Type: String
+    Description: App subnet 1 id from the network stack.
+
+  AppSubnet2Id:
+    Type: String
+    Description: App subnet 2 id from the network stack.
+
+  DataSubnet1Id:
+    Type: String
+    Description: Data subnet 1 id from the network stack (RDS Proxy needs Secrets Manager too).
+
+  DataSubnet2Id:
+    Type: String
+    Description: Data subnet 2 id from the network stack.
+
+  VpcEndpointsSecurityGroupId:
+    Type: String
+    Description: Security group id for interface endpoints from the security stack.
+
+Resources:
+  EcrApiEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.api
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref AppSubnet1Id
+        - !Ref AppSubnet2Id
+      SecurityGroupIds:
+        - !Ref VpcEndpointsSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpce-ecr-api
+
+  EcrDkrEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ecr.dkr
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref AppSubnet1Id
+        - !Ref AppSubnet2Id
+      SecurityGroupIds:
+        - !Ref VpcEndpointsSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpce-ecr-dkr
+
+  CloudWatchLogsEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.logs
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref AppSubnet1Id
+        - !Ref AppSubnet2Id
+      SecurityGroupIds:
+        - !Ref VpcEndpointsSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpce-logs
+
+  SecretsManagerEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.secretsmanager
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref AppSubnet1Id
+        - !Ref AppSubnet2Id
+        - !Ref DataSubnet1Id
+        - !Ref DataSubnet2Id
+      SecurityGroupIds:
+        - !Ref VpcEndpointsSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpce-secretsmanager

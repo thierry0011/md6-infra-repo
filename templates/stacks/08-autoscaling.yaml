@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  To-Do App - Application Auto Scaling for the ECS service: 1-4 tasks,
+  target-tracking on average CPU utilization.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: md6-todo
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  MinCapacity:
+    Type: Number
+    Default: 1
+
+  MaxCapacity:
+    Type: Number
+    Default: 4
+
+  CpuTargetValue:
+    Type: Number
+    Default: 60
+
+  EcsClusterName:
+    Type: String
+    Description: ECS cluster name from the ecs-alb stack.
+
+  EcsServiceName:
+    Type: String
+    Description: ECS service name from the ecs-alb stack.
+
+Resources:
+  ScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-ecs-autoscaling
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: application-autoscaling.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole
+
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      ServiceNamespace: ecs
+      ResourceId: !Sub service/${EcsClusterName}/${EcsServiceName}
+      ScalableDimension: ecs:service:DesiredCount
+      MinCapacity: !Ref MinCapacity
+      MaxCapacity: !Ref MaxCapacity
+      RoleARN: !GetAtt ScalingRole.Arn
+
+  CpuTargetTrackingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${ProjectName}-${Environment}-cpu-target-tracking
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref CpuTargetValue
+        ScaleInCooldown: 120
+        ScaleOutCooldown: 60

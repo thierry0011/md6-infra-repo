@@ -1,0 +1,16 @@
+template-file-path: templates/bootstrap.yaml
+parameters:
+  ProjectName: md6-todo
+  Environment: dev
+  GitHubOrg: "thierry0011"
+  GitHubInfraRepo: "md6-infra-repo"
+  GitHubDeployBranch: "main"
+  # If this AWS account already has a token.actions.githubusercontent.com
+  # OIDC provider (e.g. from another lab's bootstrap stack in this same
+  # account), set this to "false" - an account can only have one. Set to
+  # "true" if this is a fresh account with no provider yet.
+  CreateOidcProvider: "false"
+tags:
+  Project: md6-todo
+  Environment: dev
+  ManagedBy: CloudFormation-GitSync

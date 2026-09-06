@@ -1,0 +1,212 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  To-Do App - Security groups (least privilege) and the shared KMS CMK used
+  to encrypt RDS, ElastiCache, Secrets Manager, ECR, S3 and CloudWatch Logs
+  at rest. Six security groups form a strict chain: internet -> alb-sg ->
+  app-sg -> proxy-sg -> db-sg (app never reaches RDS directly - that's the
+  whole point of the Proxy), app-sg -> cache-sg, and app-sg/proxy-sg ->
+  vpce-sg.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: md6-todo
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  ContainerPort:
+    Type: Number
+    Default: 8000
+    Description: Port the Django/Gunicorn container listens on.
+
+  TestListenerPort:
+    Type: Number
+    Default: 8080
+    Description: ALB "test" listener port used by CodeDeploy blue/green validation.
+
+  VpcId:
+    Type: String
+    Description: VPC id from the network stack.
+
+  VpcCidr:
+    Type: String
+    Description: VPC CIDR block from the network stack.
+
+Resources:
+  # ---------------- KMS ----------------
+  AppKmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub CMK for ${ProjectName}-${Environment} (RDS, ElastiCache, Secrets Manager, ECR, S3, Logs)
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RootAccountFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogsUse
+            Effect: Allow
+            Principal:
+              Service: !Sub logs.${AWS::Region}.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: "*"
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cmk
+
+  AppKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${ProjectName}-${Environment}
+      TargetKeyId: !Ref AppKmsKey
+
+  # ---------------- Security groups ----------------
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public ALB - allows inbound HTTP from the internet
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from internet
+        - IpProtocol: tcp
+          FromPort: !Ref TestListenerPort
+          ToPort: !Ref TestListenerPort
+          CidrIp: 0.0.0.0/0
+          Description: CodeDeploy test listener (blue/green validation)
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-alb-sg
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS tasks - allows inbound only from the ALB on the container port
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-app-sg
+
+  AppIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref AppSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref ContainerPort
+      ToPort: !Ref ContainerPort
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Description: Container port from ALB
+
+  ProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS Proxy - allows inbound only from ECS tasks
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-proxy-sg
+
+  ProxyIngressFromApp:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ProxySecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref AppSecurityGroup
+      Description: PostgreSQL from ECS tasks
+
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: RDS PostgreSQL - allows inbound only from the RDS Proxy, never directly from ECS
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-sg
+
+  DbIngressFromProxy:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DbSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref ProxySecurityGroup
+      Description: PostgreSQL from RDS Proxy only
+
+  CacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ElastiCache Redis - allows inbound only from ECS tasks
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-cache-sg
+
+  CacheIngressFromApp:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref CacheSecurityGroup
+      IpProtocol: tcp
+      FromPort: 6379
+      ToPort: 6379
+      SourceSecurityGroupId: !Ref AppSecurityGroup
+      Description: Redis from ECS tasks
+
+  VpcEndpointsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Interface VPC endpoints - allows HTTPS from inside the VPC only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS from within the VPC (app tasks and RDS Proxy)
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpce-sg
+
+Outputs:
+  AppKmsKeyArn:
+    Value: !GetAtt AppKmsKey.Arn
+
+  AppKmsKeyId:
+    Value: !Ref AppKmsKey
+
+  AlbSecurityGroupId:
+    Value: !Ref AlbSecurityGroup
+
+  AppSecurityGroupId:
+    Value: !Ref AppSecurityGroup
+
+  ProxySecurityGroupId:
+    Value: !Ref ProxySecurityGroup
+
+  DbSecurityGroupId:
+    Value: !Ref DbSecurityGroup
+
+  CacheSecurityGroupId:
+    Value: !Ref CacheSecurityGroup
+
+  VpcEndpointsSecurityGroupId:
+    Value: !Ref VpcEndpointsSecurityGroup

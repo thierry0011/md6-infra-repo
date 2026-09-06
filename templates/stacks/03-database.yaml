@@ -1,0 +1,216 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  To-Do App - RDS PostgreSQL (db.t3 family) in dedicated data subnets,
+  fronted by RDS Proxy. Credentials live in Secrets Manager, encrypted with
+  the shared CMK. The app only ever talks to the Proxy endpoint - the
+  db-sg security group enforces this too (only proxy-sg may reach 5432 on
+  the DB instance).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: md6-todo
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    AllowedValues: [db.t3.micro, db.t3.small, db.t3.medium]
+
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+
+  DBEngineVersion:
+    Type: String
+    Default: "16.4"
+
+  DBName:
+    Type: String
+    Default: todoapp
+
+  DBMultiAZ:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Multi-AZ RDS failover roughly doubles cost; off by default for this lab.
+
+  DBDeletionProtection:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+
+  DBBackupRetentionDays:
+    Type: Number
+    Default: 7
+
+  DataSubnet1Id:
+    Type: String
+    Description: Data subnet 1 id from the network stack.
+
+  DataSubnet2Id:
+    Type: String
+    Description: Data subnet 2 id from the network stack.
+
+  AppKmsKeyId:
+    Type: String
+    Description: Shared CMK key id from the security stack.
+
+  AppKmsKeyArn:
+    Type: String
+    Description: Shared CMK ARN from the security stack.
+
+  DbSecurityGroupId:
+    Type: String
+    Description: RDS security group id from the security stack.
+
+  ProxySecurityGroupId:
+    Type: String
+    Description: RDS Proxy security group id from the security stack.
+
+Conditions:
+  IsMultiAZ: !Equals [!Ref DBMultiAZ, "true"]
+
+Resources:
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub Data subnets for ${ProjectName}-${Environment} RDS
+      SubnetIds:
+        - !Ref DataSubnet1Id
+        - !Ref DataSubnet2Id
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-subnet-group
+
+  DBCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub ${ProjectName}-${Environment}-db-credentials
+      Description: RDS PostgreSQL master credentials for the To-Do app
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "todoappadmin"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: "\"@/\\ '"
+      KmsKeyId: !Ref AppKmsKeyId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-credentials
+
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub ${ProjectName}-${Environment}-db
+      Engine: postgres
+      EngineVersion: !Ref DBEngineVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      KmsKeyId: !Ref AppKmsKeyArn
+      DBName: !Ref DBName
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DBCredentialsSecret}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DBCredentialsSecret}:SecretString:password}}"
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DbSecurityGroupId
+      MultiAZ: !If [IsMultiAZ, true, false]
+      PubliclyAccessible: false
+      BackupRetentionPeriod: !Ref DBBackupRetentionDays
+      DeletionProtection: !Ref DBDeletionProtection
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+      EnablePerformanceInsights: true
+      PerformanceInsightsKMSKeyId: !Ref AppKmsKeyArn
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db
+
+  DBSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DBCredentialsSecret
+      TargetId: !Ref DBInstance
+      TargetType: AWS::RDS::DBInstance
+
+  # ---------------- RDS Proxy ----------------
+  DBProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-db-proxy
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadDbSecret
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref DBCredentialsSecret
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Ref AppKmsKeyArn
+
+  DBProxy:
+    Type: AWS::RDS::DBProxy
+    Properties:
+      DBProxyName: !Sub ${ProjectName}-${Environment}-db-proxy
+      EngineFamily: POSTGRESQL
+      RoleArn: !GetAtt DBProxyRole.Arn
+      Auth:
+        - AuthScheme: SECRETS
+          SecretArn: !Ref DBCredentialsSecret
+          IAMAuth: DISABLED
+      VpcSubnetIds:
+        - !Ref DataSubnet1Id
+        - !Ref DataSubnet2Id
+      VpcSecurityGroupIds:
+        - !Ref ProxySecurityGroupId
+      RequireTLS: true
+      DebugLogging: false
+      IdleClientTimeout: 1800
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-db-proxy
+
+  DBProxyTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: !Ref DBProxy
+      TargetGroupName: default
+      DBInstanceIdentifiers:
+        - !Ref DBInstance
+      ConnectionPoolConfigurationInfo:
+        MaxConnectionsPercent: 100
+        MaxIdleConnectionsPercent: 50
+        ConnectionBorrowTimeout: 120
+
+Outputs:
+  DBProxyEndpoint:
+    Value: !GetAtt DBProxy.Endpoint
+    Description: The app connects only to this endpoint, never to the raw RDS instance.
+
+  DBInstanceEndpointAddress:
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Description: Raw RDS endpoint - for teardown/ops use only, never given to the app.
+
+  DBName:
+    Value: !Ref DBName
+
+  DBCredentialsSecretArn:
+    Value: !Ref DBCredentialsSecret

@@ -1,0 +1,48 @@
+# Not a Git-sync deployment file - root.yaml is deployed directly by
+# .github/workflows/deploy-root-stack.yml, which reads the `parameters` and
+# `tags` blocks below to build `aws cloudformation deploy`'s
+# --parameter-overrides and --tags. Edit values here to change the deploy;
+# a push to this file (or to templates/root.yaml / templates/stacks/**)
+# triggers the workflow.
+parameters:
+  ProjectName: md6-todo
+  Environment: dev
+  VpcCidr: "10.30.0.0/16"
+  PublicSubnet1Cidr: "10.30.0.0/24"
+  PublicSubnet2Cidr: "10.30.1.0/24"
+  AppSubnet1Cidr: "10.30.10.0/24"
+  AppSubnet2Cidr: "10.30.11.0/24"
+  DataSubnet1Cidr: "10.30.20.0/24"
+  DataSubnet2Cidr: "10.30.21.0/24"
+  CacheSubnet1Cidr: "10.30.30.0/24"
+  CacheSubnet2Cidr: "10.30.31.0/24"
+  EnableNatGateway: "false"
+  ContainerPort: "8000"
+  TestListenerPort: "8080"
+  DBInstanceClass: db.t3.micro
+  DBAllocatedStorage: "20"
+  DBEngineVersion: "16.4"
+  DBName: todoapp
+  DBMultiAZ: "false"
+  DBDeletionProtection: "false"
+  DBBackupRetentionDays: "7"
+  CacheNodeType: cache.t3.micro
+  NumCacheClusters: "1"
+  GitHubOrg: "thierry0011"
+  GitHubAppRepo: "md6-app-repo"
+  GitHubDeployBranch: "main"
+  # bootstrap.yaml already created the account's OIDC provider - this stack
+  # must not try to create a second one.
+  CreateOidcProvider: "false"
+  TaskCpu: "512"
+  TaskMemory: "1024"
+  ContainerImage: public.ecr.aws/docker/library/httpd:2.4
+  DjangoAllowedHosts: "*"
+  MinCapacity: "1"
+  MaxCapacity: "4"
+  CpuTargetValue: "60"
+  DeploymentTimeoutMinutes: "15"
+tags:
+  Project: md6-todo
+  Environment: dev
+  ManagedBy: GitHubActions-Deploy

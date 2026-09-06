@@ -1,0 +1,78 @@
+name: Deploy nested stack
+
+# Package AND deploy in one run - templates/root.packaged.yaml only ever
+# exists as a local file in this job's workspace, never committed. This
+# also means the trigger paths below don't need to guard against a
+# self-triggering commit (there isn't one).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "templates/root.yaml"
+      - "templates/stacks/**"
+      - "deployments/root.yaml"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # required for OIDC federation to AWS
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ROOT_STACK_NAME: md6-todo-dev-root
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      # Settings -> Secrets and variables -> Actions -> New repository secret.
+      # AWS_ROLE_ARN: InfraDeployRole ARN, output by bootstrap.yaml.
+      # TEMPLATES_BUCKET: bucket name, output by bootstrap.yaml.
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+      TEMPLATES_BUCKET: ${{ secrets.TEMPLATES_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package nested-stack templates to S3
+        run: |
+          aws cloudformation package \
+            --template-file templates/root.yaml \
+            --s3-bucket "$TEMPLATES_BUCKET" \
+            --s3-prefix nested-stacks \
+            --output-template-file /tmp/root.packaged.yaml
+
+      - name: Install yq
+        run: |
+          sudo curl -sL -o /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Build --parameter-overrides and --tags from deployments/root.yaml
+        run: |
+          PARAMS=$(yq -r '.parameters | to_entries | map("\(.key)=\(.value|tostring)") | join(" ")' deployments/root.yaml)
+          TAGS=$(yq -r '.tags | to_entries | map("\(.key)=\(.value|tostring)") | join(" ")' deployments/root.yaml)
+          echo "PARAMS=$PARAMS" >> "$GITHUB_ENV"
+          echo "TAGS=$TAGS" >> "$GITHUB_ENV"
+
+      - name: Deploy root stack (creates/updates all 9 nested stacks)
+        run: |
+          aws cloudformation deploy \
+            --template-file /tmp/root.packaged.yaml \
+            --stack-name "$ROOT_STACK_NAME" \
+            --role-arn "$AWS_ROLE_ARN" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides $PARAMS \
+            --tags $TAGS \
+            --no-fail-on-empty-changeset
+
+      - name: Show stack outputs
+        if: always()
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name "$ROOT_STACK_NAME" \
+            --query "Stacks[0].Outputs" --output table || true

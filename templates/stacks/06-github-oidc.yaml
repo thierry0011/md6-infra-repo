@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  To-Do App - GitHub Actions OIDC federation. Creates the GitHub OIDC
+  identity provider (or reuses one that already exists in the account) and
+  an IAM role the application repo's workflow assumes to push images to
+  ECR. No long-lived AWS credentials are used anywhere in CI/CD.
+
+  Deliberately has no dependency on the ecr stack: ECR has no standalone
+  "repository policy" resource type in CloudFormation (only an inline
+  RepositoryPolicyText property on AWS::ECR::Repository itself), so the
+  repo name is deterministic here and used to build this role's own IAM
+  policy Resource ARN directly, rather than importing it. That keeps the
+  ecr <-> github-oidc dependency one-directional: ecr depends on this
+  stack's GitHubActionsRoleArn output, and this stack depends on nothing
+  from ecr.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: md6-todo
+
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  GitHubOrg:
+    Type: String
+    Description: GitHub org or username that owns the application repo, e.g. "thierry0011".
+
+  GitHubAppRepo:
+    Type: String
+    Default: md6-app-repo
+    Description: Name of the application repository.
+
+  GitHubDeployBranch:
+    Type: String
+    Default: main
+    Description: Branch allowed to assume this role.
+
+  CreateOidcProvider:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Set to "false" if a token.actions.githubusercontent.com OIDC provider
+      already exists in this AWS account (an account can only have one) -
+      e.g. because bootstrap.yaml already created it.
+
+Conditions:
+  ShouldCreateOidcProvider: !Equals [!Ref CreateOidcProvider, "true"]
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: ShouldCreateOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+        - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
+
+  GitHubActionsEcrPushRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${Environment}-github-actions-ecr-push
+      Description: Assumed by GitHub Actions via OIDC to build and push the app image to ECR.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${GitHubAppRepo}:ref:refs/heads/${GitHubDeployBranch}
+                  - !Sub repo:${GitHubOrg}@*/${GitHubAppRepo}@*:ref:refs/heads/${GitHubDeployBranch}
+      MaxSessionDuration: 3600
+      Policies:
+        - PolicyName: EcrPushAndAuth
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: EcrPushToAppRepo
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:PutImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-${Environment}-app
+              # Read-only - lets the app repo's workflow look up CURRENT
+              # infra values (DB proxy endpoint, cache endpoint, secret
+              # ARNs) at build time instead of relying on GitHub Secrets
+              # that go stale the moment those resources are ever recreated
+              # (new random suffixes). No GetSecretValue - only enough to
+              # resolve an ARN by its stable, deterministic name.
+              - Sid: LookUpLiveInfraValues
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackResource
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-${Environment}-*/*
+              - Sid: LookUpSecretArns
+                Effect: Allow
+                Action: secretsmanager:DescribeSecret
+                Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}-${Environment}-*
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-github-actions-role
+
+Outputs:
+  GitHubActionsRoleArn:
+    Value: !GetAtt GitHubActionsEcrPushRole.Arn
+    Description: Put this in the app repo's GitHub Actions workflow as the role-to-assume.
