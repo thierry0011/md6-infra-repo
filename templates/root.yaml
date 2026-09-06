@@ -401,5 +401,23 @@ Outputs:
   DBProxyEndpoint:
     Value: !GetAtt DatabaseStack.Outputs.DBProxyEndpoint
 
+  DBName:
+    Value: !GetAtt DatabaseStack.Outputs.DBName
+
+  DBCredentialsSecretArn:
+    Value: !GetAtt DatabaseStack.Outputs.DBCredentialsSecretArn
+
   CacheEndpointAddress:
     Value: !GetAtt CacheStack.Outputs.CacheEndpointAddress
+
+  CacheEndpointPort:
+    Value: !GetAtt CacheStack.Outputs.CacheEndpointPort
+
+  TaskExecutionRoleArn:
+    Value: !GetAtt EcsAlbStack.Outputs.TaskExecutionRoleArn
+
+  TaskRoleArn:
+    Value: !GetAtt EcsAlbStack.Outputs.TaskRoleArn
+
+  DjangoSecretKeySecretArn:
+    Value: !GetAtt EcsAlbStack.Outputs.DjangoSecretKeySecretArn

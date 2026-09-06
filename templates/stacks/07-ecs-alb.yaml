@@ -472,5 +472,8 @@ Outputs:
   TaskRoleArn:
     Value: !GetAtt TaskRole.Arn
 
+  DjangoSecretKeySecretArn:
+    Value: !Ref DjangoSecretKey
+
   AppLogGroupName:
     Value: !Ref AppLogGroup
