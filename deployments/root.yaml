@@ -18,7 +18,6 @@ parameters:
   CacheSubnet2Cidr: "10.30.31.0/24"
   EnableNatGateway: "false"
   ContainerPort: "8000"
-  TestListenerPort: "8080"
   DBInstanceClass: db.t3.micro
   DBAllocatedStorage: "20"
   DBEngineVersion: "16.4"

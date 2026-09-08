@@ -78,7 +78,6 @@ with Diagram(
     cfn = Cloudformation("CloudFormation\n(nested stacks)")
 
     users >> Edge(label="HTTP") >> alb >> Edge(label=":8000") >> svc_blue
-    alb >> Edge(style="dashed", label="test listener") >> svc_green
 
     igw >> alb
 

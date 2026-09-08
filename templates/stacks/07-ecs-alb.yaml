@@ -1,10 +1,13 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  To-Do App - Public ALB with two target groups + two listeners (blue/green
-  for CodeDeploy), an S3 bucket for ALB access logs, ECS Fargate cluster,
-  task definition and service. The service's DeploymentController is
-  CODE_DEPLOY: CodeDeploy owns traffic shifting between the two target
-  groups, CloudFormation only owns the initial state.
+  To-Do App - Public ALB with two target groups (blue/green for CodeDeploy)
+  behind one prod listener, an S3 bucket for ALB access logs, ECS Fargate
+  cluster, task definition and service. The service's DeploymentController
+  is CODE_DEPLOY: CodeDeploy owns traffic shifting between the two target
+  groups, CloudFormation only owns the initial state. No test listener -
+  CodeDeploy validates the new task set via the target group's own health
+  check, not a side-channel URL (the pipeline never pauses for manual
+  validation anyway - see 09-cicd-pipeline.yaml's ActionOnTimeout).
 
 Parameters:
   ProjectName:
@@ -19,10 +22,6 @@ Parameters:
   ContainerPort:
     Type: Number
     Default: 8000
-
-  TestListenerPort:
-    Type: Number
-    Default: 8080
 
   TaskCpu:
     Type: String
@@ -241,16 +240,6 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref BlueTargetGroup
 
-  TestListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Properties:
-      LoadBalancerArn: !Ref ApplicationLoadBalancer
-      Port: !Ref TestListenerPort
-      Protocol: HTTP
-      DefaultActions:
-        - Type: forward
-          TargetGroupArn: !Ref GreenTargetGroup
-
   DjangoSecretKey:
     Type: AWS::SecretsManager::Secret
     DeletionPolicy: Retain
@@ -407,7 +396,7 @@ Resources:
 
   AppService:
     Type: AWS::ECS::Service
-    DependsOn: [ProdListener, TestListener]
+    DependsOn: [ProdListener]
     Properties:
       ServiceName: !Sub ${ProjectName}-${Environment}-service
       Cluster: !Ref EcsCluster
@@ -457,9 +446,6 @@ Outputs:
 
   ProdListenerArn:
     Value: !Ref ProdListener
-
-  TestListenerArn:
-    Value: !Ref TestListener
 
   BlueTargetGroupName:
     Value: !GetAtt BlueTargetGroup.TargetGroupName

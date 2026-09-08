@@ -85,10 +85,6 @@ Parameters:
     Type: String
     Description: Production listener ARN from the ecs-alb stack.
 
-  TestListenerArn:
-    Type: String
-    Description: Test listener ARN from the ecs-alb stack.
-
   EcsClusterName:
     Type: String
     Description: ECS cluster name from the ecs-alb stack.
@@ -344,9 +340,6 @@ Resources:
           - ProdTrafficRoute:
               ListenerArns:
                 - !Ref ProdListenerArn
-            TestTrafficRoute:
-              ListenerArns:
-                - !Ref TestListenerArn
             TargetGroups:
               - Name: !Ref BlueTargetGroupName
               - Name: !Ref GreenTargetGroupName

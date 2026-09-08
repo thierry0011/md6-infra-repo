@@ -26,7 +26,7 @@ Internet ──HTTP───▶ ALB (public subnets, 2 AZ)
                        ▼
               ECS Fargate service (app subnets, 2 AZ)
               ├─ Blue target group  (prod listener :80)
-              └─ Green target group (test listener :8080)
+              └─ Green target group (no test listener - CodeDeploy validates via target group health)
                        │
               ┌────────┴────────┐
               ▼                 ▼

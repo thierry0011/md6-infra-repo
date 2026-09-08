@@ -72,10 +72,6 @@ Parameters:
     Type: Number
     Default: 8000
 
-  TestListenerPort:
-    Type: Number
-    Default: 8080
-
   # ---- database ----
   DBInstanceClass:
     Type: String
@@ -207,7 +203,6 @@ Resources:
         ProjectName: !Ref ProjectName
         Environment: !Ref Environment
         ContainerPort: !Ref ContainerPort
-        TestListenerPort: !Ref TestListenerPort
         VpcId: !GetAtt NetworkStack.Outputs.VpcId
         VpcCidr: !GetAtt NetworkStack.Outputs.VpcCidr
       Tags:
@@ -308,7 +303,6 @@ Resources:
         ProjectName: !Ref ProjectName
         Environment: !Ref Environment
         ContainerPort: !Ref ContainerPort
-        TestListenerPort: !Ref TestListenerPort
         TaskCpu: !Ref TaskCpu
         TaskMemory: !Ref TaskMemory
         ContainerImage: !Ref ContainerImage
@@ -367,7 +361,6 @@ Resources:
         BlueTargetGroupName: !GetAtt EcsAlbStack.Outputs.BlueTargetGroupName
         GreenTargetGroupName: !GetAtt EcsAlbStack.Outputs.GreenTargetGroupName
         ProdListenerArn: !GetAtt EcsAlbStack.Outputs.ProdListenerArn
-        TestListenerArn: !GetAtt EcsAlbStack.Outputs.TestListenerArn
         EcsClusterName: !GetAtt EcsAlbStack.Outputs.EcsClusterName
         EcsServiceName: !GetAtt EcsAlbStack.Outputs.EcsServiceName
         TaskDefinitionFamily: !GetAtt EcsAlbStack.Outputs.TaskDefinitionFamily

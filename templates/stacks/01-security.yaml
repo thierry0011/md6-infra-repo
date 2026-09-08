@@ -22,11 +22,6 @@ Parameters:
     Default: 8000
     Description: Port the Django/Gunicorn container listens on.
 
-  TestListenerPort:
-    Type: Number
-    Default: 8080
-    Description: ALB "test" listener port used by CodeDeploy blue/green validation.
-
   VpcId:
     Type: String
     Description: VPC id from the network stack.
@@ -86,11 +81,6 @@ Resources:
           ToPort: 80
           CidrIp: 0.0.0.0/0
           Description: HTTP from internet
-        - IpProtocol: tcp
-          FromPort: !Ref TestListenerPort
-          ToPort: !Ref TestListenerPort
-          CidrIp: 0.0.0.0/0
-          Description: CodeDeploy test listener (blue/green validation)
       Tags:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-alb-sg
