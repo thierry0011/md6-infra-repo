@@ -295,6 +295,14 @@ Resources:
                   - elasticache:RemoveTagsFromResource
                   - elasticache:ListTagsForResource
                 Resource: "*"
+              # The account's first ElastiCache replication group auto-creates this service-linked role.
+              - Sid: ElasticacheServiceLinkedRole
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/elasticache.amazonaws.com/AWSServiceRoleForElastiCache
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: elasticache.amazonaws.com
 
               # 05-ecr.yaml's ECR repo and 06-github-oidc.yaml's repository policy.
               - Sid: EcrRepository
