@@ -217,12 +217,12 @@ Resources:
                   --network-configuration "awsvpcConfiguration={subnets=[${AppSubnet1Id},${AppSubnet2Id}],securityGroups=[${AppSecurityGroupId}],assignPublicIp=DISABLED}"
                   --overrides "{\"containerOverrides\":[{\"name\":\"app\",\"image\":\"$IMAGE_URI\",\"command\":[\"python\",\"manage.py\",\"migrate\",\"--noinput\"]}]}"
                   --query 'tasks[0].taskArn' --output text)
-                - echo "Migration task: $TASK_ARN"
+                - 'echo "Migration task: $TASK_ARN"'
                 - aws ecs wait tasks-stopped --cluster ${EcsClusterName} --tasks "$TASK_ARN"
                 - >
                   EXIT_CODE=$(aws ecs describe-tasks --cluster ${EcsClusterName} --tasks "$TASK_ARN"
                   --query 'tasks[0].containers[0].exitCode' --output text)
-                - echo "Migration task exit code: $EXIT_CODE"
+                - 'echo "Migration task exit code: $EXIT_CODE"'
                 - test "$EXIT_CODE" = "0"
       Environment:
         Type: LINUX_CONTAINER
