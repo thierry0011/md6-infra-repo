@@ -102,12 +102,7 @@ Resources:
                   - ecr:BatchGetImage
                   - ecr:GetDownloadUrlForLayer
                 Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-${Environment}-app
-              # Read-only - lets the app repo's workflow look up CURRENT
-              # infra values (DB proxy endpoint, cache endpoint, secret
-              # ARNs) at build time instead of relying on GitHub Secrets
-              # that go stale the moment those resources are ever recreated
-              # (new random suffixes). No GetSecretValue - only enough to
-              # resolve an ARN by its stable, deterministic name.
+              # Read-only lookup of live infra values at build time, so nothing goes stale like a copied GitHub Secret would - no GetSecretValue here.
               - Sid: LookUpLiveInfraValues
                 Effect: Allow
                 Action:

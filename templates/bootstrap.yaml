@@ -79,9 +79,7 @@ Resources:
         - 6938fd4d98bab03faadb97b34396831e3780aea1
         - 1c58a3a8518e8759bf075b76b750d4f2df264fcd
 
-  # Dual-trust: GitHub Actions (OIDC) assumes this to run `cloudformation
-  # package`+`deploy`, and CloudFormation assumes the same role while it
-  # provisions the resources declared in root.yaml's nested stacks.
+  # Dual-trust role: GitHub Actions (OIDC) runs cloudformation package+deploy, CloudFormation uses it to provision root.yaml's nested stacks.
   InfraDeployRole:
     Type: AWS::IAM::Role
     Properties:
@@ -119,7 +117,7 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # ---- Packaging: upload/read child templates in S3 ----
+              # Lets the deploy workflow upload/read packaged child templates in S3.
               - Sid: TemplatesBucketAccess
                 Effect: Allow
                 Action:
@@ -131,9 +129,7 @@ Resources:
                 Action: s3:ListBucket
                 Resource: !GetAtt TemplatesBucket.Arn
 
-              # ---- CloudFormation: the root stack + its nested children
-              #      (nested stack physical names are always prefixed with
-              #      the parent's, so one wildcard covers both) ----
+              # Root stack + its nested children (one wildcard covers both - nested stack names are always prefixed with the parent's).
               - Sid: CloudFormationStackOperations
                 Effect: Allow
                 Action:
@@ -154,9 +150,7 @@ Resources:
                 Resource:
                   - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-${Environment}-*/*
 
-              # ---- 00-network.yaml: EC2 networking. Most of these actions
-              #      don't support resource-level ARNs (AWS limitation, not
-              #      a scoping choice), hence Resource: "*" ----
+              # 00-network.yaml's EC2 networking - Resource: "*" because most of these actions have no resource-level ARN (AWS limitation, not a scoping choice).
               - Sid: NetworkEc2
                 Effect: Allow
                 Action:
@@ -198,7 +192,7 @@ Resources:
                   - ec2:DescribeTags
                 Resource: "*"
 
-              # ---- 01-security.yaml: KMS CMK + security groups ----
+              # 01-security.yaml's KMS CMK + security groups.
               - Sid: SecurityKms
                 Effect: Allow
                 Action:
@@ -216,10 +210,7 @@ Resources:
                   - kms:DeleteAlias
                   - kms:UpdateAlias
                   - kms:ListAliases
-                  # Required for OTHER services (RDS, ElastiCache,
-                  # Secrets Manager, ECR, CloudWatch Logs, S3) to actually
-                  # use this customer managed key, not just for
-                  # describing/managing the key resource itself.
+                  # Needed by other services (RDS, ElastiCache, Secrets Manager, ECR, Logs, S3) to actually use this key, not just describe it.
                   - kms:CreateGrant
                   - kms:RevokeGrant
                   - kms:ListGrants
@@ -242,7 +233,7 @@ Resources:
                   - ec2:RevokeSecurityGroupEgress
                 Resource: "*"
 
-              # ---- 03-database.yaml: RDS + RDS Proxy + Secrets Manager ----
+              # 03-database.yaml's RDS instance, RDS Proxy, and Secrets Manager secret.
               - Sid: DatabaseRds
                 Effect: Allow
                 Action:
@@ -256,9 +247,7 @@ Resources:
                   - rds:AddTagsToResource
                   - rds:RemoveTagsFromResource
                   - rds:ListTagsForResource
-                  # DBInstance has DeletionPolicy: Snapshot - deleting it (on
-                  # stack deletion/rollback) requires taking a final
-                  # snapshot first.
+                  # DBInstance's DeletionPolicy: Snapshot requires this to delete it on stack teardown/rollback.
                   - rds:CreateDBSnapshot
                   - rds:DescribeDBSnapshots
                   # RDS Proxy
@@ -284,16 +273,13 @@ Resources:
                   - secretsmanager:TagResource
                   - secretsmanager:UntagResource
                 Resource: !Sub arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ProjectName}-*
-              # GetRandomPassword isn't a resource-level action - IAM
-              # requires Resource: "*" for it.
+              # GetRandomPassword has no resource-level ARN, so Resource: "*" is required here.
               - Sid: SecretsManagerGetRandomPassword
                 Effect: Allow
                 Action: secretsmanager:GetRandomPassword
                 Resource: "*"
 
-              # ---- 04-cache.yaml: ElastiCache Redis. Like EC2, most
-              #      ElastiCache actions don't support resource-level ARNs
-              #      consistently, hence Resource: "*" ----
+              # 04-cache.yaml's ElastiCache Redis - Resource: "*" since most ElastiCache actions lack resource-level ARNs.
               - Sid: Elasticache
                 Effect: Allow
                 Action:
@@ -310,7 +296,7 @@ Resources:
                   - elasticache:ListTagsForResource
                 Resource: "*"
 
-              # ---- 05-ecr.yaml / 06-github-oidc.yaml: ECR repo + its policy ----
+              # 05-ecr.yaml's ECR repo and 06-github-oidc.yaml's repository policy.
               - Sid: EcrRepository
                 Effect: Allow
                 Action:
@@ -328,9 +314,7 @@ Resources:
                   - ecr:UntagResource
                   - ecr:ListTagsForResource
                 Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-*
-              # Pull-through cache for the ECS bootstrap placeholder image
-              # (see 05-ecr.yaml) - separate resource prefix, not scoped
-              # under ${ProjectName}-*.
+              # Pull-through cache for the ECS bootstrap placeholder image (05-ecr.yaml) - a separate prefix, not under ${ProjectName}-*.
               - Sid: EcrPullThroughCache
                 Effect: Allow
                 Action:
@@ -347,7 +331,7 @@ Resources:
                   - ecr:TagResource
                 Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/ecr-public/*
 
-              # ---- IAM roles created by the nested stacks (03, 06, 07, 08, 09) ----
+              # IAM roles created by the nested stacks: 03, 06, 07, 08, 09.
               - Sid: IamRolesForStacks
                 Effect: Allow
                 Action:
@@ -365,12 +349,7 @@ Resources:
                   - iam:TagRole
                   - iam:UntagRole
                 Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-*
-              # PassRole granted separately, per consuming service, scoped by
-              # iam:PassedToService rather than a blanket '*' - covers
-              # DBProxyRole (03), TaskExecutionRole/TaskRole (07),
-              # ScalingRole (08), CodePipelineServiceRole/
-              # CodeDeployServiceRole/EventBridgeInvokePipelineRole/
-              # MigrationProjectRole (09).
+              # PassRole scoped by iam:PassedToService (not a blanket "*") - covers DBProxyRole (03), TaskExecutionRole/TaskRole (07), ScalingRole (08), and the CodePipeline/CodeDeploy/EventBridge/CodeBuild roles (09).
               - Sid: PassRolesToServices
                 Effect: Allow
                 Action: iam:PassRole
@@ -378,11 +357,7 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService:
-                      # cloudformation.amazonaws.com: this role passing
-                      # itself, required for `aws cloudformation deploy
-                      # --role-arn` (CreateChangeSet needs iam:PassRole on
-                      # whatever --role-arn names, even when it's the same
-                      # role as the caller).
+                      # This role passing itself - `aws cloudformation deploy --role-arn` needs iam:PassRole even when the role IS the caller.
                       - cloudformation.amazonaws.com
                       - rds.amazonaws.com
                       - ecs-tasks.amazonaws.com
@@ -392,7 +367,7 @@ Resources:
                       - codebuild.amazonaws.com
                       - events.amazonaws.com
 
-              # ---- 07-ecs-alb.yaml: ALB, ECS, CloudWatch Logs, S3 access-logs bucket ----
+              # 07-ecs-alb.yaml's ALB, ECS cluster/service, CloudWatch Logs, and S3 access-logs bucket.
               - Sid: EcsAlb
                 Effect: Allow
                 Action:
@@ -465,7 +440,7 @@ Resources:
                   - s3:ListBucket
                 Resource: !Sub arn:${AWS::Partition}:s3:::${ProjectName}-*
 
-              # ---- 08-autoscaling.yaml: Application Auto Scaling ----
+              # 08-autoscaling.yaml's Application Auto Scaling target/policy.
               - Sid: Autoscaling
                 Effect: Allow
                 Action:
@@ -476,8 +451,7 @@ Resources:
                   - application-autoscaling:DeleteScalingPolicy
                   - application-autoscaling:DescribeScalingPolicies
                 Resource: "*"
-              # First ScalableTarget in the account auto-creates this
-              # service-linked role.
+              # The account's first ScalableTarget auto-creates this service-linked role.
               - Sid: EcsAutoscalingServiceLinkedRole
                 Effect: Allow
                 Action: iam:CreateServiceLinkedRole
@@ -485,10 +459,7 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:AWSServiceName: ecs.application-autoscaling.amazonaws.com
-              # 07-ecs-alb.yaml: the first ECS service in the account/region
-              # integrated with a load balancer auto-creates this
-              # service-linked role too (separate from the autoscaling one
-              # above).
+              # The account's first ALB-integrated ECS service auto-creates this service-linked role too (separate from the one above).
               - Sid: EcsServiceLinkedRole
                 Effect: Allow
                 Action: iam:CreateServiceLinkedRole
@@ -497,9 +468,7 @@ Resources:
                   StringEquals:
                     iam:AWSServiceName: ecs.amazonaws.com
 
-              # ---- 09-cicd-pipeline.yaml: CodeStar Connections,
-              #      CodePipeline, CodeBuild (migration stage), CodeDeploy,
-              #      EventBridge, CloudWatch alarms ----
+              # 09-cicd-pipeline.yaml's CodeStar Connection, CodePipeline, CodeBuild (migrate stage), CodeDeploy, EventBridge, and CloudWatch alarms.
               - Sid: CicdPipeline
                 Effect: Allow
                 Action:

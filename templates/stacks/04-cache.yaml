@@ -68,9 +68,7 @@ Resources:
         - !Ref CacheSecurityGroupId
       AtRestEncryptionEnabled: true
       KmsKeyId: !Ref AppKmsKeyArn
-      # In-transit encryption stays off by default to keep the app's Redis
-      # client simple (plain `redis://`, no TLS cert handling) - flip on
-      # (and switch the app to `rediss://`) for a real production posture.
+      # Off by default so the app can use plain redis:// - flip on (and switch the app to rediss://) for production.
       TransitEncryptionEnabled: false
       Tags:
         - Key: Name

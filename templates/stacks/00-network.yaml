@@ -96,7 +96,7 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # ---------------- Public subnets (ALB) ----------------
+  # Public subnets (ALB) - internet-facing, 2 AZ.
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -151,7 +151,7 @@ Resources:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
-  # ---------------- App subnets (ECS) - only tier that can ever get NAT ----------------
+  # App subnets (ECS tasks) - the only tier that can ever get a NAT route.
   AppSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -206,7 +206,7 @@ Resources:
       SubnetId: !Ref AppSubnet2
       RouteTableId: !Ref AppRouteTable2
 
-  # ---------------- Data subnets (RDS + RDS Proxy) - no internet route, ever ----------------
+  # Data subnets (RDS + RDS Proxy) - no internet route, ever.
   DataSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -253,7 +253,7 @@ Resources:
       SubnetId: !Ref DataSubnet2
       RouteTableId: !Ref DataRouteTable
 
-  # ---------------- Cache subnets (ElastiCache) - no internet route, ever ----------------
+  # Cache subnets (ElastiCache) - no internet route, ever.
   CacheSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -300,7 +300,7 @@ Resources:
       SubnetId: !Ref CacheSubnet2
       RouteTableId: !Ref CacheRouteTable
 
-  # ---------------- Optional NAT (off by default, app tier only) ----------------
+  # Optional NAT Gateway (off by default) - app tier only, never data/cache.
   NatGateway1Eip:
     Type: AWS::EC2::EIP
     Condition: CreateNatGateway
@@ -349,7 +349,7 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NatGateway2
 
-  # ---------------- S3 Gateway endpoint (free, attaches to route tables) ----------------
+  # S3 gateway endpoint (no cost) - attached to every route table above.
   S3GatewayEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:

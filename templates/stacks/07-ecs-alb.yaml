@@ -103,12 +103,11 @@ Parameters:
     Description: ElastiCache Redis primary endpoint port from the cache stack.
 
 Conditions:
-  # True only for the default bootstrap value - lets a real ContainerImage
-  # pass through untouched once one is supplied.
+  # True only for the default bootstrap value - a real ContainerImage passes through unchanged.
   IsPlaceholderImage: !Equals [!Ref ContainerImage, "public.ecr.aws/docker/library/httpd:2.4"]
 
 Resources:
-  # ---------------- ALB access logs ----------------
+  # S3 bucket the ALB delivers its own access logs to (SSE-S3 only, ALB's requirement).
   AccessLogsBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -139,9 +138,7 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          # Region-agnostic method (works in every region, no per-region
-          # ELB account ID mapping needed) - AWS's own log-delivery service
-          # principal, scoped to this bucket + this account's log prefix.
+          # Region-agnostic: AWS's log-delivery service principal, no per-region ELB account ID mapping needed.
           - Sid: AWSLogDeliveryWrite
             Effect: Allow
             Principal:
@@ -155,7 +152,7 @@ Resources:
             Action: s3:GetBucketAcl
             Resource: !GetAtt AccessLogsBucket.Arn
 
-  # ---------------- ALB ----------------
+  # Public ALB with two target groups (blue/green) behind one prod listener.
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     DependsOn: AccessLogsBucketPolicy
@@ -254,7 +251,7 @@ Resources:
         ExcludePunctuation: true
       KmsKeyId: !Ref AppKmsKeyId
 
-  # ---------------- ECS ----------------
+  # ECS Fargate cluster, task definition, and service (CodeDeploy-controlled).
   EcsCluster:
     Type: AWS::ECS::Cluster
     Properties:
@@ -346,16 +343,13 @@ Resources:
         OperatingSystemFamily: LINUX
       ContainerDefinitions:
         - Name: app
-          # Placeholder pulls through our own ECR (no NAT needed - see
-          # 05-ecr.yaml's PublicEcrPullThroughCache); a real ContainerImage
-          # passes through unchanged.
+          # Placeholder pulls through our own ECR (see 05-ecr.yaml) - a real ContainerImage passes through unchanged.
           Image: !If
             - IsPlaceholderImage
             - !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/ecr-public/docker/library/httpd:2.4
             - !Ref ContainerImage
           Essential: true
-          # Placeholder-only: httpd needs :8000 (not :80) and a 200 at /health/.
-          # CodeDeploy swaps in the real app's own task definition later.
+          # Placeholder-only: httpd needs :8000 and a 200 at /health/ - CodeDeploy swaps in the real app's task definition later.
           Command:
             - "httpd-foreground"
             - "-C"

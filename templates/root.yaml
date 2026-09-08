@@ -25,7 +25,7 @@ Parameters:
     Default: dev
     AllowedValues: [dev, staging, prod]
 
-  # ---- network ----
+  # Feeds NetworkStack: VPC CIDR, the 4 subnet tiers x 2 AZ, and the NAT toggle.
   VpcCidr:
     Type: String
     Default: 10.30.0.0/16
@@ -67,12 +67,12 @@ Parameters:
     Default: "false"
     AllowedValues: ["true", "false"]
 
-  # ---- security / ecs-alb shared ----
+  # Shared between SecurityStack (SG rule) and EcsAlbStack (task/target group port).
   ContainerPort:
     Type: Number
     Default: 8000
 
-  # ---- database ----
+  # Feeds DatabaseStack: RDS instance class/storage/engine/name and Multi-AZ/deletion-protection toggles.
   DBInstanceClass:
     Type: String
     Default: db.t3.micro
@@ -104,7 +104,7 @@ Parameters:
     Type: Number
     Default: 7
 
-  # ---- cache ----
+  # Feeds CacheStack: Redis node type and cluster count (1 = single node, 2+ = Multi-AZ failover).
   CacheNodeType:
     Type: String
     Default: cache.t3.micro
@@ -113,7 +113,7 @@ Parameters:
     Type: Number
     Default: 1
 
-  # ---- github-oidc / cicd-pipeline shared ----
+  # Shared between GithubOidcStack (OIDC role trust) and CicdPipelineStack (GitHub source action).
   GitHubOrg:
     Type: String
     Description: GitHub org or username that owns the application repo.
@@ -136,7 +136,7 @@ Parameters:
       token.actions.githubusercontent.com OIDC provider (an account can
       only have one).
 
-  # ---- ecs-alb ----
+  # Feeds EcsAlbStack: Fargate task size, the bootstrap placeholder image, and Django's ALLOWED_HOSTS.
   TaskCpu:
     Type: String
     Default: "512"
@@ -155,7 +155,7 @@ Parameters:
     Type: String
     Default: "*"
 
-  # ---- autoscaling ----
+  # Feeds AutoscalingStack: min/max task count and the CPU target-tracking value.
   MinCapacity:
     Type: Number
     Default: 1
@@ -168,7 +168,7 @@ Parameters:
     Type: Number
     Default: 60
 
-  # ---- cicd-pipeline ----
+  # Feeds CicdPipelineStack: how long CodeDeploy waits before terminating the old (blue) task set.
   DeploymentTimeoutMinutes:
     Type: Number
     Default: 15

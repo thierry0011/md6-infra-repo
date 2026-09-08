@@ -1,17 +1,4 @@
-# ECR tagging/trigger design (deliberately not a copy of the simpler
-# mutable-"latest" pattern some references use): the ECR repository
-# (05-ecr.yaml) is ImageTagMutability: IMMUTABLE, so CI pushes exactly one
-# unique tag per build and never reuses a tag - there is no "latest" to
-# filter on. CodePipeline's native ECR source action always watches one
-# fixed, statically-configured tag (defaults to "latest" if omitted -
-# confirmed against AWS's own action-reference-ECR docs), so the
-# EventBridge rule below has NO image-tag filter at all (fires on every
-# successful push, any tag) and its target carries an InputTransformer that
-# maps the actual pushed image's digest ($.detail.image-digest) into a
-# sourceRevisions override on StartPipelineExecution, pinning the pipeline
-# run to that exact digest regardless of the source action's static tag
-# config - a documented AWS pattern (create-cwe-ecr-source-cfn.md), not a
-# workaround.
+# ECR is IMMUTABLE (unique tag per build, no "latest"), so EventBridge has no image-tag filter and instead pins the pipeline to the exact pushed digest via an InputTransformer on StartPipelineExecution (a documented AWS pattern, not a workaround).
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   To-Do App - Blue/green deployment pipeline. An EventBridge rule detects
@@ -118,17 +105,14 @@ Parameters:
     Description: App security group id from the security stack (migration task network placement).
 
 Resources:
-  # ---------------- Connection to the application repository ----------------
-  # After creation, open the CodeConnections console once to complete the
-  # GitHub authorization handshake for this connection (one-time, manual,
-  # unavoidable step for any CodeStar/CodeConnections integration).
+  # GitHub connection - requires a one-time manual handshake in the CodeConnections console after creation.
   AppRepoConnection:
     Type: AWS::CodeStarConnections::Connection
     Properties:
       ConnectionName: !Sub ${ProjectName}-${Environment}-app-repo
       ProviderType: GitHub
 
-  # ---------------- Artifact bucket ----------------
+  # S3 bucket CodePipeline stores stage artifacts in, KMS-encrypted.
   PipelineArtifactBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -154,7 +138,7 @@ Resources:
             NoncurrentVersionExpiration:
               NoncurrentDays: 7
 
-  # ---------------- Database migration (runs before traffic ever shifts) ----------------
+  # One-off Fargate task that runs `manage.py migrate` before CodeDeploy ever shifts traffic.
   MigrationProjectRole:
     Type: AWS::IAM::Role
     Properties:
@@ -249,7 +233,7 @@ Resources:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-migrate
 
-  # ---------------- CodeDeploy (ECS blue/green) ----------------
+  # CodeDeploy application + deployment group that performs the ECS blue/green traffic shift.
   CodeDeployServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -344,7 +328,7 @@ Resources:
               - Name: !Ref BlueTargetGroupName
               - Name: !Ref GreenTargetGroupName
 
-  # ---------------- CodePipeline ----------------
+  # CodePipeline: Source (GitHub + ECR) -> Migrate (CodeBuild) -> Deploy (CodeDeployToECS).
   CodePipelineServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -459,10 +443,7 @@ Resources:
                 Provider: ECR
                 Version: "1"
               Configuration:
-                # Static placeholder only - every execution here is started
-                # with a sourceRevisions override (see EcrPushRule below)
-                # that pins the actual digest just pushed, so this value is
-                # never what actually gets deployed.
+                # Static placeholder only - EcrPushRule's sourceRevisions override always pins the real digest at execution time.
                 ImageTag: latest
                 RepositoryName: !Ref EcrRepositoryName
               OutputArtifacts:
@@ -503,7 +484,7 @@ Resources:
                 Image1ContainerName: IMAGE1_NAME
               RunOrder: 1
 
-  # ---------------- EventBridge: any successful ECR push -> start pipeline pinned to that digest ----------------
+  # EventBridge rule: any successful ECR push starts the pipeline, pinned to that exact image digest.
   EventBridgeInvokePipelineRole:
     Type: AWS::IAM::Role
     Properties:

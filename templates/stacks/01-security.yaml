@@ -31,7 +31,7 @@ Parameters:
     Description: VPC CIDR block from the network stack.
 
 Resources:
-  # ---------------- KMS ----------------
+  # Shared customer-managed KMS key, used by every encrypted resource in the app.
   AppKmsKey:
     Type: AWS::KMS::Key
     DeletionPolicy: Retain
@@ -69,7 +69,7 @@ Resources:
       AliasName: !Sub alias/${ProjectName}-${Environment}
       TargetKeyId: !Ref AppKmsKey
 
-  # ---------------- Security groups ----------------
+  # Security groups: alb-sg -> app-sg -> proxy-sg -> db-sg chain, app-sg -> cache-sg, app-sg/proxy-sg -> vpce-sg.
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:

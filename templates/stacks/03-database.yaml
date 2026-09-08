@@ -142,7 +142,7 @@ Resources:
       TargetId: !Ref DBInstance
       TargetType: AWS::RDS::DBInstance
 
-  # ---------------- RDS Proxy ----------------
+  # RDS Proxy in front of the DB instance - the app connects only to this, never to RDS directly.
   DBProxyRole:
     Type: AWS::IAM::Role
     Properties:
