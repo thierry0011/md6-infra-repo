@@ -233,6 +233,12 @@ Resources:
                   - ec2:RevokeSecurityGroupEgress
                 Resource: "*"
 
+        # Split across multiple inline policies (IAM caps a single inline PolicyDocument at 10,240 bytes) -
+        # grouped by which nested stacks each covers, not by any functional distinction.
+        - PolicyName: DeployNestedStackData
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
               # 03-database.yaml's RDS instance, RDS Proxy, and Secrets Manager secret.
               - Sid: DatabaseRds
                 Effect: Allow
@@ -348,6 +354,10 @@ Resources:
                   - ecr:TagResource
                 Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/ecr-public/*
 
+        - PolicyName: DeployNestedStackCompute
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
               # IAM roles created by the nested stacks: 03, 06, 07, 08, 09.
               - Sid: IamRolesForStacks
                 Effect: Allow
