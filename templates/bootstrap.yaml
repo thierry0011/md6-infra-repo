@@ -322,6 +322,15 @@ Resources:
                   - ecr:DeletePullThroughCacheRule
                   - ecr:DescribePullThroughCacheRules
                 Resource: "*"
+              # First pull-through-cache rule ever created in this account/region makes ECR provision its
+              # service-linked role - scoped to just that one role, not a general CreateServiceLinkedRole grant.
+              - Sid: EcrPullThroughCacheServiceLinkedRole
+                Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/pullthroughcache.ecr.amazonaws.com/AWSServiceRoleForECRPullThroughCache
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: pullthroughcache.ecr.amazonaws.com
               - Sid: EcrPublicCacheRepository
                 Effect: Allow
                 Action:
