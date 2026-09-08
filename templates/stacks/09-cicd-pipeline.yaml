@@ -161,6 +161,9 @@ Resources:
                   - ecs:RunTask
                   - ecs:DescribeTasks
                   - ecs:DescribeTaskDefinition
+                  # RunTask's container overrides can't swap the image (only name/command/env/cpu/memory) -
+                  # the migration task needs its own task definition revision pointing at this build's image.
+                  - ecs:RegisterTaskDefinition
                 Resource: "*"
               - Sid: PassEcsRoles
                 Effect: Allow
@@ -209,13 +212,27 @@ Resources:
               commands:
                 - IMAGE_URI=$(jq -r '.ImageURI' imageDetail.json)
                 - echo "Running migrations against image $IMAGE_URI"
+                # RunTask's containerOverrides can only override name/command/env/cpu/memory, not image -
+                # register a one-off task def revision (same role/resources, image swapped) to run against.
+                - >
+                  aws ecs describe-task-definition --task-definition ${TaskDefinitionFamily}
+                  --query taskDefinition > current-taskdef.json
+                - >
+                  jq --arg IMAGE_URI "$IMAGE_URI" '.containerDefinitions[0].image = $IMAGE_URI
+                  | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)'
+                  current-taskdef.json > migration-taskdef.json
+                - >
+                  NEW_TASK_DEF_ARN=$(aws ecs register-task-definition
+                  --cli-input-json file://migration-taskdef.json
+                  --query 'taskDefinition.taskDefinitionArn' --output text)
+                - 'echo "Registered migration task definition: $NEW_TASK_DEF_ARN"'
                 - >
                   TASK_ARN=$(aws ecs run-task
                   --cluster ${EcsClusterName}
-                  --task-definition ${TaskDefinitionFamily}
+                  --task-definition "$NEW_TASK_DEF_ARN"
                   --launch-type FARGATE
                   --network-configuration "awsvpcConfiguration={subnets=[${AppSubnet1Id},${AppSubnet2Id}],securityGroups=[${AppSecurityGroupId}],assignPublicIp=DISABLED}"
-                  --overrides "{\"containerOverrides\":[{\"name\":\"app\",\"image\":\"$IMAGE_URI\",\"command\":[\"python\",\"manage.py\",\"migrate\",\"--noinput\"]}]}"
+                  --overrides "{\"containerOverrides\":[{\"name\":\"app\",\"command\":[\"python\",\"manage.py\",\"migrate\",\"--noinput\"]}]}"
                   --query 'tasks[0].taskArn' --output text)
                 - 'echo "Migration task: $TASK_ARN"'
                 - aws ecs wait tasks-stopped --cluster ${EcsClusterName} --tasks "$TASK_ARN"
