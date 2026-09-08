@@ -103,6 +103,11 @@ Parameters:
     Type: String
     Description: ElastiCache Redis primary endpoint port from the cache stack.
 
+Conditions:
+  # True only for the default bootstrap value - lets a real ContainerImage
+  # pass through untouched once one is supplied.
+  IsPlaceholderImage: !Equals [!Ref ContainerImage, "public.ecr.aws/docker/library/httpd:2.4"]
+
 Resources:
   # ---------------- ALB access logs ----------------
   AccessLogsBucket:
@@ -311,6 +316,13 @@ Resources:
               - Effect: Allow
                 Action: kms:Decrypt
                 Resource: !Ref AppKmsKeyArn
+        - PolicyName: PullThroughPlaceholderImage
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecr:BatchImportUpstreamImage
+                Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/ecr-public/*
 
   TaskRole:
     Type: AWS::IAM::Role
@@ -345,15 +357,16 @@ Resources:
         OperatingSystemFamily: LINUX
       ContainerDefinitions:
         - Name: app
-          Image: !Ref ContainerImage
+          # Placeholder pulls through our own ECR (no NAT needed - see
+          # 05-ecr.yaml's PublicEcrPullThroughCache); a real ContainerImage
+          # passes through unchanged.
+          Image: !If
+            - IsPlaceholderImage
+            - !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/ecr-public/docker/library/httpd:2.4
+            - !Ref ContainerImage
           Essential: true
-          # Only takes effect for the bootstrap placeholder image - stock
-          # httpd:2.4 gets two things wrong for our target groups' health
-          # checks: it only listens on :80 by default (need :8000), and it
-          # has nothing at /health/ (404s, but the health check needs 200).
-          # CodeDeploy registers an entirely separate task definition from
-          # the app repo's own ecs/taskdef.json once the real image is
-          # live, so none of this ever reaches the real app.
+          # Placeholder-only: httpd needs :8000 (not :80) and a 200 at /health/.
+          # CodeDeploy swaps in the real app's own task definition later.
           Command:
             - "httpd-foreground"
             - "-C"

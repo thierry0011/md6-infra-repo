@@ -217,6 +217,11 @@ by root-stack rollback or deletion.
 - **No NAT Gateway by default** (`EnableNatGateway: "false"`). ECS tasks never need general internet
   egress — ECR, S3, CloudWatch Logs and Secrets Manager are all reached via VPC endpoints. The `data`
   and `cache` tiers have **no internet route at all**, NAT or otherwise, regardless of this setting.
+  The one place this would normally bite: the ECS bootstrap placeholder image is `public.ecr.aws/...`,
+  a public endpoint with no PrivateLink data path. Solved with an ECR pull-through cache
+  (`05-ecr.yaml`'s `PublicEcrPullThroughCache`) instead of a NAT Gateway — the task pulls from our own
+  private ECR (reachable via the existing `ecr.api`/`ecr.dkr` endpoints), and ECR fetches the upstream
+  image on its own side, not over the task's network path.
 - **RDS Multi-AZ is off by default** (`DBMultiAZ: "false"`) — the VPC itself is Multi-AZ (all 4 tiers
   span 2 AZs) per the requirement, but a standby RDS replica roughly doubles DB cost. Flip on for a real
   production posture.

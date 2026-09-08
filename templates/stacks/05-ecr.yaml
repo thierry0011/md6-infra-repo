@@ -31,6 +31,17 @@ Parameters:
     Description: ARN of the GitHub Actions OIDC role, from the github-oidc stack.
 
 Resources:
+  # Lets ECS pull the bootstrap placeholder image (public.ecr.aws/docker/
+  # library/httpd) through our own private ECR, via the ecr.api/ecr.dkr VPC
+  # endpoints - no NAT Gateway needed. The upstream fetch happens on ECR's
+  # side, not over the task's network path. See 07-ecs-alb.yaml's
+  # ContainerImage handling.
+  PublicEcrPullThroughCache:
+    Type: AWS::ECR::PullThroughCacheRule
+    Properties:
+      EcrRepositoryPrefix: ecr-public
+      UpstreamRegistryUrl: public.ecr.aws
+
   AppRepository:
     Type: AWS::ECR::Repository
     Properties:

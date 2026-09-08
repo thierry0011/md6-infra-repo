@@ -328,6 +328,24 @@ Resources:
                   - ecr:UntagResource
                   - ecr:ListTagsForResource
                 Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ProjectName}-*
+              # Pull-through cache for the ECS bootstrap placeholder image
+              # (see 05-ecr.yaml) - separate resource prefix, not scoped
+              # under ${ProjectName}-*.
+              - Sid: EcrPullThroughCache
+                Effect: Allow
+                Action:
+                  - ecr:CreatePullThroughCacheRule
+                  - ecr:DeletePullThroughCacheRule
+                  - ecr:DescribePullThroughCacheRules
+                Resource: "*"
+              - Sid: EcrPublicCacheRepository
+                Effect: Allow
+                Action:
+                  - ecr:CreateRepository
+                  - ecr:DescribeRepositories
+                  - ecr:BatchImportUpstreamImage
+                  - ecr:TagResource
+                Resource: !Sub arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/ecr-public/*
 
               # ---- IAM roles created by the nested stacks (03, 06, 07, 08, 09) ----
               - Sid: IamRolesForStacks
