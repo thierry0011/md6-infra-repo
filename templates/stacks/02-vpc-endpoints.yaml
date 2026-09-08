@@ -98,8 +98,6 @@ Resources:
       SubnetIds:
         - !Ref AppSubnet1Id
         - !Ref AppSubnet2Id
-        - !Ref DataSubnet1Id
-        - !Ref DataSubnet2Id
       SecurityGroupIds:
         - !Ref VpcEndpointsSecurityGroupId
       Tags:
