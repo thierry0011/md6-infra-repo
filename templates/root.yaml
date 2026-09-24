@@ -1,21 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: >
-  To-Do App - root nested-stack template. Owns 7 child stacks (network,
-  security, vpc-endpoints, database, cache, ecs-alb, autoscaling,
-  cicd-pipeline) as AWS::CloudFormation::Stack resources, wiring
-  cross-stack values via !GetAtt instead of Fn::Export/Fn::ImportValue.
-  This is a single flat nesting (no intermediate grouping stacks) because
-  the dependency graph crosses too many boundaries for grouping to pay for
-  itself - see EcsAlbStack below, which pulls from network, security,
-  database and cache all at once.
-  DEPLOYED BY: .github/workflows/deploy-root-stack.yml, which packages this
-  file to S3 and runs `aws cloudformation deploy` in the same job run - the
-  packaged template is never written into the repo or committed anywhere,
-  it exists only as a local file inside that job. Not Git-sync-deployed.
-  PREREQUISITE: Md6-bootstrap-repo's stack must already be deployed - the
-  GitHub OIDC provider, InfraDeployRole, and the ECR repository this stack
-  references by name/ARN (EcrRepositoryName/EcrRepositoryArn parameters)
-  all live there now, not in this nested-stack tree.
+Description: To-Do App root stack - 7 nested stacks wired via !GetAtt. Deployed by deploy-root-stack.yml; needs Md6-bootstrap-repo first.
 
 Parameters:
   ProjectName:
@@ -27,7 +11,7 @@ Parameters:
     Default: dev
     AllowedValues: [dev, staging, prod]
 
-  # Feeds NetworkStack: VPC CIDR, the 4 subnet tiers x 2 AZ, and the NAT toggle.
+  # NetworkStack inputs.
   VpcCidr:
     Type: String
     Default: 10.30.0.0/16
@@ -69,12 +53,12 @@ Parameters:
     Default: "false"
     AllowedValues: ["true", "false"]
 
-  # Shared between SecurityStack (SG rule) and EcsAlbStack (task/target group port).
+  # Used by SecurityStack and EcsAlbStack.
   ContainerPort:
     Type: Number
     Default: 8000
 
-  # Feeds DatabaseStack: RDS instance class/storage/engine/name and Multi-AZ/deletion-protection toggles.
+  # DatabaseStack inputs.
   DBInstanceClass:
     Type: String
     Default: db.t3.micro
@@ -106,7 +90,7 @@ Parameters:
     Type: Number
     Default: 7
 
-  # Feeds CacheStack: Redis node type and cluster count (1 = single node, 2+ = Multi-AZ failover).
+  # CacheStack inputs (1 node = no failover).
   CacheNodeType:
     Type: String
     Default: cache.t3.micro
@@ -115,25 +99,20 @@ Parameters:
     Type: Number
     Default: 1
 
-  # From Md6-bootstrap-repo's outputs - the ECR repo and the app repo's push
-  # role both live there now, not in this nested-stack tree.
+  # From Md6-bootstrap-repo's outputs.
   EcrRepositoryName:
     Type: String
-    Description: ECR repository name, from Md6-bootstrap-repo's EcrRepositoryName output.
+    Description: Bootstrap output EcrRepositoryName.
 
   EcrRepositoryArn:
     Type: String
-    Description: ECR repository ARN, from Md6-bootstrap-repo's EcrRepositoryArn output.
+    Description: Bootstrap output EcrRepositoryArn.
 
   GitHubActionsRoleArn:
     Type: String
-    Description: >
-      App repo's GitHub Actions role ARN, from Md6-bootstrap-repo's
-      GitHubActionsRoleArn output. Feeds CicdPipelineStack, which grants it
-      write access to the pipeline artifact bucket's source/* prefix so
-      the app repo's CI can upload the taskdef.json/appspec.yaml template.
+    Description: App repo CI role ARN (bootstrap output GitHubActionsRoleArn).
 
-  # Feeds EcsAlbStack: Fargate task size, the bootstrap placeholder image, and Django's ALLOWED_HOSTS.
+  # EcsAlbStack inputs.
   TaskCpu:
     Type: String
     Default: "512"
@@ -152,7 +131,7 @@ Parameters:
     Type: String
     Default: "*"
 
-  # Feeds AutoscalingStack: min/max task count and the CPU target-tracking value.
+  # AutoscalingStack inputs.
   MinCapacity:
     Type: Number
     Default: 1
@@ -165,7 +144,7 @@ Parameters:
     Type: Number
     Default: 60
 
-  # Feeds CicdPipelineStack: how long CodeDeploy waits before terminating the old (blue) task set.
+  # CicdPipelineStack inputs.
   DeploymentTimeoutMinutes:
     Type: Number
     Default: 15
@@ -346,7 +325,7 @@ Outputs:
 
   PipelineArtifactBucketName:
     Value: !GetAtt CicdPipelineStack.Outputs.PipelineArtifactBucketName
-    Description: Put this in the app repo's build-and-push.yml as ARTIFACT_BUCKET.
+    Description: App repo variable ARTIFACT_BUCKET.
 
   DBProxyEndpoint:
     Value: !GetAtt DatabaseStack.Outputs.DBProxyEndpoint

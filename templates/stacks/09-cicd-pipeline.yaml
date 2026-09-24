@@ -1,19 +1,6 @@
-# ECR is IMMUTABLE (unique tag per build, no "latest"), so EventBridge has no image-tag filter and instead pins the pipeline to the exact pushed digest via an InputTransformer on StartPipelineExecution (a documented AWS pattern, not a workaround).
+# ECR is IMMUTABLE: EventBridge fires on any push and pins the run to the pushed digest.
 AWSTemplateFormatVersion: "2010-09-09"
-Description: >
-  To-Do App - Blue/green deployment pipeline. The pipeline has two Source
-  actions: an ECR source action that resolves the pushed image's digest
-  natively, and an S3 source action reading a static taskdef.json/
-  appspec.yaml template (containing a literal "<IMAGE1_NAME>" placeholder
-  in the image field) that the app repo's CI uploads via its own GitHub
-  OIDC role - CodePipeline never talks to GitHub directly, so there's no
-  CodeConnections handshake to complete for this repo. The app repo's
-  workflow uploads the template *before* pushing the image, so it's always
-  already in place by the time the ECR-push trigger fires. An EventBridge
-  rule detects every successful image push to ECR (no tag filter - see
-  comment above) and starts CodePipeline, which runs a one-off database
-  migration via CodeBuild, then hands off to CodeDeploy for an ECS
-  blue/green traffic shift between the two ALB target groups.
+Description: To-Do App - pipeline (ECR + S3 template source -> CodeBuild migrate -> CodeDeploy blue/green), started by EventBridge on ECR push.
 
 Parameters:
   ProjectName:
@@ -27,17 +14,12 @@ Parameters:
 
   GitHubActionsRoleArn:
     Type: String
-    Description: >
-      GitHub Actions role ARN from Md6-bootstrap-repo's stack. Granted
-      write access to this stack's S3 artifact bucket (source prefix only)
-      and encrypt/decrypt on AppKmsKeyArn, so the app repo's CI can upload
-      the taskdef.json/appspec.yaml template without CodePipeline ever
-      reading from GitHub directly.
+    Description: App repo CI role ARN - granted upload to source/* and KMS encrypt.
 
   DeploymentTimeoutMinutes:
     Type: Number
     Default: 15
-    Description: Minutes CodeDeploy waits for the old (blue) task set to be terminated after traffic shifts.
+    Description: Minutes before the old (blue) task set is terminated.
 
   AppKmsKeyArn:
     Type: String
@@ -45,11 +27,11 @@ Parameters:
 
   EcrRepositoryName:
     Type: String
-    Description: ECR repository name from the ecr stack.
+    Description: ECR repository name (bootstrap stack).
 
   EcrRepositoryArn:
     Type: String
-    Description: ECR repository ARN from the ecr stack.
+    Description: ECR repository ARN (bootstrap stack).
 
   AlbFullName:
     Type: String
@@ -108,8 +90,7 @@ Parameters:
     Description: App security group id from the security stack (migration task network placement).
 
 Resources:
-  # S3 bucket CodePipeline stores stage artifacts in, KMS-encrypted. Also the
-  # target the app repo's CI uploads the taskdef.json/appspec.yaml template to.
+  # Pipeline artifacts bucket; app CI uploads the deploy template here.
   PipelineArtifactBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -135,7 +116,7 @@ Resources:
             NoncurrentVersionExpiration:
               NoncurrentDays: 7
 
-  # Grants the app repo's CI role write access to just the deploy-artifact prefix.
+  # App CI may write only to source/*.
   PipelineArtifactBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -166,7 +147,7 @@ Resources:
       Roles:
         - !Select [1, !Split ["/", !Ref GitHubActionsRoleArn]]
 
-  # One-off Fargate task that runs `manage.py migrate` before CodeDeploy ever shifts traffic.
+  # Runs manage.py migrate as a one-off Fargate task before deploy.
   MigrationProjectRole:
     Type: AWS::IAM::Role
     Properties:
@@ -189,8 +170,7 @@ Resources:
                   - ecs:RunTask
                   - ecs:DescribeTasks
                   - ecs:DescribeTaskDefinition
-                  # RunTask's container overrides can't swap the image (only name/command/env/cpu/memory) -
-                  # the migration task needs its own task definition revision pointing at this build's image.
+                  # Registers a migration task def revision with this build's image.
                   - ecs:RegisterTaskDefinition
                 Resource: "*"
               - Sid: PassEcsRoles
@@ -224,7 +204,7 @@ Resources:
     Type: AWS::CodeBuild::Project
     Properties:
       Name: !Sub ${ProjectName}-${Environment}-migrate
-      Description: Runs `python manage.py migrate` as a one-off Fargate task before CodeDeploy shifts traffic.
+      Description: Runs manage.py migrate before CodeDeploy shifts traffic.
       ServiceRole: !GetAtt MigrationProjectRole.Arn
       Artifacts:
         Type: CODEPIPELINE
@@ -240,8 +220,7 @@ Resources:
               commands:
                 - IMAGE_URI=$(jq -r '.ImageURI' imageDetail.json)
                 - echo "Running migrations against image $IMAGE_URI"
-                # RunTask's containerOverrides can only override name/command/env/cpu/memory, not image -
-                # register a one-off task def revision (same role/resources, image swapped) to run against.
+                # RunTask can't override the image, so register a revision that uses it.
                 - >
                   aws ecs describe-task-definition --task-definition ${TaskDefinitionFamily}
                   --query taskDefinition > current-taskdef.json
@@ -278,7 +257,7 @@ Resources:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-migrate
 
-  # CodeDeploy application + deployment group that performs the ECS blue/green traffic shift.
+  # CodeDeploy blue/green for ECS.
   CodeDeployServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -373,7 +352,7 @@ Resources:
               - Name: !Ref BlueTargetGroupName
               - Name: !Ref GreenTargetGroupName
 
-  # CodePipeline: Source (GitHub + ECR) -> Migrate (CodeBuild) -> Deploy (CodeDeployToECS).
+  # Pipeline: Source (S3 + ECR) -> Migrate -> Deploy.
   CodePipelineServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -463,7 +442,7 @@ Resources:
       Stages:
         - Name: Source
           Actions:
-            # Static template (taskdef.json has a literal "<IMAGE1_NAME>" placeholder) - uploaded before every image push, see the app repo's build-and-push.yml.
+            # Deploy template uploaded by the app repo's CI.
             - Name: TaskDefTemplateSource
               ActionTypeId:
                 Category: Source
@@ -484,7 +463,7 @@ Resources:
                 Provider: ECR
                 Version: "1"
               Configuration:
-                # Static placeholder only - EcrPushRule's sourceRevisions override always pins the real digest at execution time.
+                # Placeholder - EventBridge pins the real digest.
                 ImageTag: latest
                 RepositoryName: !Ref EcrRepositoryName
               OutputArtifacts:
@@ -525,7 +504,7 @@ Resources:
                 Image1ContainerName: IMAGE1_NAME
               RunOrder: 1
 
-  # EventBridge rule: any successful ECR push starts the pipeline, pinned to that exact image digest.
+  # Any successful ECR push starts the pipeline at that digest.
   EventBridgeInvokePipelineRole:
     Type: AWS::IAM::Role
     Properties:
@@ -550,9 +529,7 @@ Resources:
     Type: AWS::Events::Rule
     Properties:
       Name: !Sub ${ProjectName}-${Environment}-ecr-push-trigger
-      Description: >
-        Starts the deployment pipeline on every successful image push to
-        ECR, regardless of tag, pinning the run to the exact digest pushed.
+      Description: Starts the pipeline on any ECR push, pinned to the pushed digest.
       EventPattern:
         source: [aws.ecr]
         detail-type: ["ECR Image Action"]
@@ -575,7 +552,7 @@ Resources:
 Outputs:
   PipelineArtifactBucketName:
     Value: !Ref PipelineArtifactBucket
-    Description: Put this in the app repo's build-and-push.yml as ARTIFACT_BUCKET.
+    Description: App repo variable ARTIFACT_BUCKET.
 
   PipelineName:
     Value: !Ref AppPipeline

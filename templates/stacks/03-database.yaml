@@ -1,10 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: >
-  To-Do App - RDS PostgreSQL (db.t3 family) in dedicated data subnets,
-  fronted by RDS Proxy. Credentials live in Secrets Manager, encrypted with
-  the shared CMK. The app only ever talks to the Proxy endpoint - the
-  db-sg security group enforces this too (only proxy-sg may reach 5432 on
-  the DB instance).
+Description: To-Do App - RDS PostgreSQL behind RDS Proxy, credentials in Secrets Manager.
 
 Parameters:
   ProjectName:
@@ -37,7 +32,7 @@ Parameters:
     Type: String
     Default: "true"
     AllowedValues: ["true", "false"]
-    Description: Multi-AZ RDS failover roughly doubles cost; on by default for this lab.
+    Description: Multi-AZ roughly doubles DB cost.
 
   DBDeletionProtection:
     Type: String
@@ -142,7 +137,7 @@ Resources:
       TargetId: !Ref DBInstance
       TargetType: AWS::RDS::DBInstance
 
-  # RDS Proxy in front of the DB instance - the app connects only to this, never to RDS directly.
+  # RDS Proxy - the app only connects here.
   DBProxyRole:
     Type: AWS::IAM::Role
     Properties:
@@ -200,23 +195,23 @@ Resources:
         MaxIdleConnectionsPercent: 50
         ConnectionBorrowTimeout: 120
 
-  # Published so the app repo's static ecs/taskdef.json can reference it directly (as a "secrets" valueFrom) - no CI-side lookup/render needed.
+  # Read by the app's taskdef.json as a secret.
   DBProxyEndpointParameter:
     Type: AWS::SSM::Parameter
     Properties:
       Name: !Sub ${ProjectName}-${Environment}-db-proxy-endpoint
       Type: String
       Value: !GetAtt DBProxy.Endpoint
-      Description: RDS Proxy endpoint, read by the app repo's ECS task at container launch.
+      Description: RDS Proxy endpoint for the app task.
 
 Outputs:
   DBProxyEndpoint:
     Value: !GetAtt DBProxy.Endpoint
-    Description: The app connects only to this endpoint, never to the raw RDS instance.
+    Description: The only DB endpoint the app uses.
 
   DBInstanceEndpointAddress:
     Value: !GetAtt DBInstance.Endpoint.Address
-    Description: Raw RDS endpoint - for teardown/ops use only, never given to the app.
+    Description: Raw RDS endpoint - ops only.
 
   DBName:
     Value: !Ref DBName

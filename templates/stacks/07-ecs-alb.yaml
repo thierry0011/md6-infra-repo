@@ -1,13 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: >
-  To-Do App - Public ALB with two target groups (blue/green for CodeDeploy)
-  behind one prod listener, an S3 bucket for ALB access logs, ECS Fargate
-  cluster, task definition and service. The service's DeploymentController
-  is CODE_DEPLOY: CodeDeploy owns traffic shifting between the two target
-  groups, CloudFormation only owns the initial state. No test listener -
-  CodeDeploy validates the new task set via the target group's own health
-  check, not a side-channel URL (the pipeline never pauses for manual
-  validation anyway - see 09-cicd-pipeline.yaml's ActionOnTimeout).
+Description: To-Do App - public ALB (blue/green target groups), access-logs bucket, ECS Fargate cluster and CodeDeploy-controlled service.
 
 Parameters:
   ProjectName:
@@ -36,15 +28,12 @@ Parameters:
   ContainerImage:
     Type: String
     Default: public.ecr.aws/docker/library/httpd:2.4
-    Description: >
-      Bootstrap placeholder image so the ECS service can start before the
-      first real application image exists. The CodeDeploy pipeline replaces
-      this with the ECR app image on the first successful deployment.
+    Description: Image the service starts on; CodeDeploy replaces it on the first deploy.
 
   DjangoAllowedHosts:
     Type: String
     Default: "*"
-    Description: Comma-separated ALLOWED_HOSTS for Django; tighten to the ALB DNS name after first deploy.
+    Description: Comma-separated Django ALLOWED_HOSTS.
 
   VpcId:
     Type: String
@@ -84,7 +73,7 @@ Parameters:
 
   DBProxyEndpoint:
     Type: String
-    Description: RDS Proxy endpoint from the database stack - the app only ever talks to this.
+    Description: RDS Proxy endpoint from the database stack.
 
   DBName:
     Type: String
@@ -103,11 +92,11 @@ Parameters:
     Description: ElastiCache Redis primary endpoint port from the cache stack.
 
 Conditions:
-  # True only for the default bootstrap value - a real ContainerImage passes through unchanged.
+  # True only for the public httpd default.
   IsPlaceholderImage: !Equals [!Ref ContainerImage, "public.ecr.aws/docker/library/httpd:2.4"]
 
 Resources:
-  # S3 bucket the ALB delivers its own access logs to (SSE-S3 only, ALB's requirement).
+  # ALB access-logs bucket.
   AccessLogsBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -117,7 +106,7 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
-      # ALB access logs only support SSE-S3, not SSE-KMS.
+      # ALB logs require SSE-S3.
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -138,7 +127,7 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          # Region-agnostic: AWS's log-delivery service principal, no per-region ELB account ID mapping needed.
+          # Log-delivery service principal - works in any region.
           - Sid: AWSLogDeliveryWrite
             Effect: Allow
             Principal:
@@ -152,7 +141,7 @@ Resources:
             Action: s3:GetBucketAcl
             Resource: !GetAtt AccessLogsBucket.Arn
 
-  # Public ALB with two target groups (blue/green) behind one prod listener.
+  # ALB with blue/green target groups.
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     DependsOn: AccessLogsBucketPolicy
@@ -243,7 +232,7 @@ Resources:
     UpdateReplacePolicy: Retain
     Properties:
       Name: !Sub ${ProjectName}-${Environment}-django-secret-key
-      Description: Django SECRET_KEY, generated once and injected into the task at runtime.
+      Description: Django SECRET_KEY.
       GenerateSecretString:
         SecretStringTemplate: "{}"
         GenerateStringKey: SECRET_KEY
@@ -251,7 +240,7 @@ Resources:
         ExcludePunctuation: true
       KmsKeyId: !Ref AppKmsKeyId
 
-  # ECS Fargate cluster, task definition, and service (CodeDeploy-controlled).
+  # ECS cluster, task definition, service.
   EcsCluster:
     Type: AWS::ECS::Cluster
     Properties:
@@ -295,7 +284,7 @@ Resources:
                 Resource:
                   - !Ref DBCredentialsSecretArn
                   - !Ref DjangoSecretKey
-        # The app repo's taskdef.json reads POSTGRES_HOST/REDIS_HOST from these SSM parameters (03-database.yaml/04-cache.yaml).
+        # Endpoint parameters read by the app's taskdef.json.
         - PolicyName: ReadEndpointParameters
           PolicyDocument:
             Version: "2012-10-17"
@@ -331,12 +320,7 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
-      Description: >
-        Runtime role for the Django container itself. No AWS SDK calls are
-        needed for this app today (no S3/file storage) - kept as a bare,
-        assumable role so a future feature (e.g. CloudWatch custom
-        metrics) only needs an inline policy added here, not a new role
-        threaded through the task definition and pipeline.
+      Description: Runtime role for the Django container (no AWS calls needed yet).
 
   AppTaskDefinition:
     Type: AWS::ECS::TaskDefinition
@@ -353,13 +337,13 @@ Resources:
         OperatingSystemFamily: LINUX
       ContainerDefinitions:
         - Name: app
-          # Placeholder pulls through our own ECR (see Md6-bootstrap-repo's bootstrap.yaml) - a real ContainerImage passes through unchanged.
+          # The public httpd default is rewritten to the pull-through cache path.
           Image: !If
             - IsPlaceholderImage
             - !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/ecr-public/docker/library/httpd:2.4
             - !Ref ContainerImage
           Essential: true
-          # Placeholder-only: httpd needs :8000 and a 200 at /health/ - CodeDeploy swaps in the real app's task definition later.
+          # Placeholder only: httpd on the container port, 200 at /health/.
           Command:
             - "httpd-foreground"
             - "-C"

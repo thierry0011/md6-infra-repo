@@ -1,10 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: >
-  To-Do App - Multi-AZ network foundation: VPC with four dedicated subnet
-  tiers (public/ALB, app/ECS, data/RDS+Proxy, cache/ElastiCache) x 2 AZ,
-  routing, optional NAT for the app tier only, and the S3 gateway endpoint.
-  The data and cache tiers never get an internet route of any kind, NAT
-  included - they are reached only from inside the VPC.
+Description: To-Do App - VPC, 4 subnet tiers x 2 AZ, routing, optional NAT (app tier only), S3 gateway endpoint.
 
 Parameters:
   ProjectName:
@@ -57,13 +52,7 @@ Parameters:
     Type: String
     Default: "false"
     AllowedValues: ["true", "false"]
-    Description: >
-      Cost/security decision: with S3, ECR, CloudWatch Logs and Secrets
-      Manager VPC endpoints in place, ECS tasks never need general internet
-      egress, so NAT Gateways (~$32/mo + data processing, each) can stay off
-      by default. Only ever applies to the app tier - the data and cache
-      tiers have no internet route regardless of this setting. Flip to
-      "true" only if the app needs arbitrary outbound internet access.
+    Description: NAT for the app tier only; off by default since VPC endpoints cover AWS access.
 
 Conditions:
   CreateNatGateway: !Equals [!Ref EnableNatGateway, "true"]
@@ -96,7 +85,7 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # Public subnets (ALB) - internet-facing, 2 AZ.
+  # Public subnets (ALB).
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -151,7 +140,7 @@ Resources:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
-  # App subnets (ECS tasks) - the only tier that can ever get a NAT route.
+  # App subnets (ECS) - the only tier that can get NAT.
   AppSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -206,7 +195,7 @@ Resources:
       SubnetId: !Ref AppSubnet2
       RouteTableId: !Ref AppRouteTable2
 
-  # Data subnets (RDS + RDS Proxy) - no internet route, ever.
+  # Data subnets (RDS + Proxy) - no internet route.
   DataSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -253,7 +242,7 @@ Resources:
       SubnetId: !Ref DataSubnet2
       RouteTableId: !Ref DataRouteTable
 
-  # Cache subnets (ElastiCache) - no internet route, ever.
+  # Cache subnets - no internet route.
   CacheSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -300,7 +289,7 @@ Resources:
       SubnetId: !Ref CacheSubnet2
       RouteTableId: !Ref CacheRouteTable
 
-  # Optional NAT Gateway (off by default) - app tier only, never data/cache.
+  # Optional NAT, app tier only.
   NatGateway1Eip:
     Type: AWS::EC2::EIP
     Condition: CreateNatGateway
@@ -349,7 +338,7 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       NatGatewayId: !Ref NatGateway2
 
-  # S3 gateway endpoint (no cost) - attached to every route table above.
+  # S3 gateway endpoint on every route table.
   S3GatewayEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:

@@ -1,11 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: >
-  To-Do App - Security groups (least privilege) and the shared KMS CMK used
-  to encrypt RDS, ElastiCache, Secrets Manager, ECR, S3 and CloudWatch Logs
-  at rest. Six security groups form a strict chain: internet -> alb-sg ->
-  app-sg -> proxy-sg -> db-sg (app never reaches RDS directly - that's the
-  whole point of the Proxy), app-sg -> cache-sg, and app-sg/proxy-sg ->
-  vpce-sg.
+Description: To-Do App - shared KMS key and least-privilege SG chain (alb -> app -> proxy -> db, app -> cache, vpce).
 
 Parameters:
   ProjectName:
@@ -31,13 +25,13 @@ Parameters:
     Description: VPC CIDR block from the network stack.
 
 Resources:
-  # Shared customer-managed KMS key, used by every encrypted resource in the app.
+  # Shared CMK for all encrypted resources.
   AppKmsKey:
     Type: AWS::KMS::Key
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      Description: !Sub CMK for ${ProjectName}-${Environment} (RDS, ElastiCache, Secrets Manager, ECR, S3, Logs)
+      Description: !Sub CMK for ${ProjectName}-${Environment}
       EnableKeyRotation: true
       KeyPolicy:
         Version: "2012-10-17"
@@ -69,7 +63,7 @@ Resources:
       AliasName: !Sub alias/${ProjectName}-${Environment}
       TargetKeyId: !Ref AppKmsKey
 
-  # Security groups: alb-sg -> app-sg -> proxy-sg -> db-sg chain, app-sg -> cache-sg, app-sg/proxy-sg -> vpce-sg.
+  # Security groups.
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:

@@ -1,9 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: >
-  To-Do App - Interface VPC endpoints so ECS tasks (app subnets) and the RDS
-  Proxy (data subnets) can reach ECR, CloudWatch Logs and Secrets Manager
-  without a NAT Gateway. The S3 gateway endpoint lives in 00-network.yaml
-  (gateway endpoints attach to route tables, not subnets).
+Description: To-Do App - interface VPC endpoints (ECR, Logs, Secrets Manager, SSM) so tasks need no NAT.
 
 Parameters:
   ProjectName:
@@ -29,7 +25,7 @@ Parameters:
 
   DataSubnet1Id:
     Type: String
-    Description: Data subnet 1 id from the network stack (RDS Proxy needs Secrets Manager too).
+    Description: Data subnet 1 id from the network stack.
 
   DataSubnet2Id:
     Type: String
@@ -104,7 +100,7 @@ Resources:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-vpce-secretsmanager
 
-  # ECS resolves the taskdef's SSM-backed secrets (proxy/Redis endpoints) at task launch - no NAT, so it needs this.
+  # SSM - ECS reads the endpoint parameters at task launch.
   SsmEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
