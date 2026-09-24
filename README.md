@@ -211,10 +211,27 @@ not a GitHub connection.
 
 ## Bootstrapping the first deploy
 
-`07-ecs-alb.yaml` starts the ECS service on a placeholder image
-(`public.ecr.aws/docker/library/httpd:2.4`) so the service has something valid to run before the app
-image exists. Once the app repo's CI has pushed at least one image and `CicdPipelineStack` exists, the
-EventBridge rule fires automatically and CodeDeploy performs the first real blue/green deployment.
+`07-ecs-alb.yaml` starts the ECS service on a placeholder `httpd` image so the service has something
+valid to run before the app image exists. `ContainerImage` in `deployments/root.yaml` points at a copy of
+`httpd:2.4` in our own ECR repo under the fixed tag `bootstrap` (same idea as md5's seeded `:latest`, but a
+fixed tag because this repo is `IMMUTABLE`). It lives in `md6-bootstrap-repo`'s ECR repo, so it survives
+every teardown/respin, and the lifecycle policy only expires `sha-*` and untagged images, so it's never
+cleaned up. The task pulls it through the existing `ecr.api`/`ecr.dkr` endpoints - no NAT, no
+pull-through cache involved.
+
+Seed it once, after `md6-bootstrap-repo`'s stack exists and **before** the first root-stack deploy (after
+that, the EventBridge rule exists and this push would start the pipeline):
+
+```bash
+REG=711387109786.dkr.ecr.us-east-1.amazonaws.com
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $REG
+docker pull --platform linux/amd64 public.ecr.aws/docker/library/httpd:2.4
+docker tag public.ecr.aws/docker/library/httpd:2.4 $REG/md6-todo-dev-app:bootstrap
+docker push $REG/md6-todo-dev-app:bootstrap
+```
+
+Once the app repo's CI has pushed its first image and `CicdPipelineStack` exists, the EventBridge rule
+fires automatically and CodeDeploy performs the first real blue/green deployment.
 
 ## Getting the ALB endpoint
 
