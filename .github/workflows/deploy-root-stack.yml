@@ -1,9 +1,5 @@
 name: Deploy nested stack
 
-# Package AND deploy in one run - templates/root.packaged.yaml only ever
-# exists as a local file in this job's workspace, never committed. This
-# also means the trigger paths below don't need to guard against a
-# self-triggering commit (there isn't one).
 on:
   push:
     branches: [main]
@@ -25,9 +21,6 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
-      # Settings -> Secrets and variables -> Actions -> New repository secret.
-      # AWS_ROLE_ARN: InfraDeployRole ARN, output by bootstrap.yaml.
-      # TEMPLATES_BUCKET: bucket name, output by bootstrap.yaml.
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       TEMPLATES_BUCKET: ${{ secrets.TEMPLATES_BUCKET }}
     steps:
@@ -59,7 +52,7 @@ jobs:
           echo "PARAMS=$PARAMS" >> "$GITHUB_ENV"
           echo "TAGS=$TAGS" >> "$GITHUB_ENV"
 
-      - name: Deploy root stack (creates/updates all 9 nested stacks)
+      - name: Deploy root stack (creates/updates all 7 nested stacks)
         run: |
           aws cloudformation deploy \
             --template-file /tmp/root.packaged.yaml \

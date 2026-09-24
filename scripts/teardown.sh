@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Tears down the md6-todo-dev root stack cleanly through CloudFormation (a
-# single delete-stack call cascades all 9 nested stacks, in the right
+# single delete-stack call cascades all 7 nested stacks, in the right
 # order, automatically - no manual per-resource deletion), then purges the
 # handful of resources that deliberately survive stack deletion because of
 # their DeletionPolicy (Retain/Snapshot - see each template). Re-run-safe:
 # every step checks whether there's anything left to do before acting.
 #
-# Does NOT touch bootstrap.yaml's stack - it's CloudFormation Git-sync-
-# managed, which has no CLI-scriptable delete path. See HANDOFF.md for the
-# console steps to remove it, and for why you'd want to leave it in place
-# most of the time anyway.
+# Does NOT touch Md6-bootstrap-repo's stack (S3 templates bucket, OIDC
+# roles, the ECR repository) - it's CloudFormation Git-sync-managed, which
+# has no CLI-scriptable delete path, and it's meant to outlive this stack
+# across respins anyway. See HANDOFF.md for the console steps to remove it.
 #
 # Usage:
 #   AWS_PROFILE=admin ./teardown.sh [--yes] [--delete-snapshot] [--schedule-key-deletion-days N]
@@ -37,7 +37,6 @@ aws() { command aws --profile "$PROFILE" --region "$REGION" "$@"; }
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ACCESS_LOGS_BUCKET="${PROJECT}-${ENV}-alb-logs-${ACCOUNT_ID}"
 PIPELINE_ARTIFACT_BUCKET="${PROJECT}-${ENV}-pipeline-artifacts-${ACCOUNT_ID}"
-ECR_REPOSITORY="${PROJECT}-${ENV}-app"
 DB_SECRET="${PROJECT}-${ENV}-db-credentials"
 DJANGO_SECRET="${PROJECT}-${ENV}-django-secret-key"
 KMS_ALIAS="alias/${PROJECT}-${ENV}"
@@ -91,22 +90,7 @@ empty_bucket_all_versions() {
 echo "==> Emptying $PIPELINE_ARTIFACT_BUCKET so stack deletion doesn't stall on it..."
 empty_bucket_all_versions "$PIPELINE_ARTIFACT_BUCKET"
 
-# --- 1b. Empty the ECR repository ----------------------------------------
-# EcrStack's AppRepository has no DeletionPolicy either, and ECR (like S3)
-# refuses to delete a non-empty repository.
-echo "==> Emptying ECR repository $ECR_REPOSITORY so EcrStack doesn't stall on it..."
-if aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null 2>&1; then
-  IMAGE_COUNT=$(aws ecr list-images --repository-name "$ECR_REPOSITORY" --query 'imageIds[] | length(@)' --output text)
-  if [ "$IMAGE_COUNT" != "0" ] && [ "$IMAGE_COUNT" != "None" ]; then
-    aws ecr list-images --repository-name "$ECR_REPOSITORY" --query 'imageIds' --output json > /tmp/teardown-ecr-images.json
-    aws ecr batch-delete-image --repository-name "$ECR_REPOSITORY" --image-ids file:///tmp/teardown-ecr-images.json >/dev/null
-    echo "    deleted $IMAGE_COUNT image(s) from $ECR_REPOSITORY"
-  fi
-else
-  echo "    $ECR_REPOSITORY doesn't exist, skipping"
-fi
-
-# --- 2. Delete the root stack (cascades all 9 nested stacks) -----------
+# --- 2. Delete the root stack (cascades all 7 nested stacks) -----------
 echo "==> Deleting stack $ROOT_STACK ..."
 aws cloudformation delete-stack --stack-name "$ROOT_STACK"
 echo "==> Waiting for deletion to complete (typically 15-25 min - RDS takes a while)..."
@@ -184,4 +168,4 @@ fi
 
 echo
 echo "==> Done. Root stack and its retained resources are handled."
-echo "==> bootstrap.yaml's stack is untouched by design - see HANDOFF.md if you also want to tear that down."
+echo "==> Md6-bootstrap-repo's stack (S3 bucket, OIDC roles, ECR repo) is untouched by design - see HANDOFF.md if you also want to tear that down."

@@ -15,8 +15,8 @@ re-derive anything from CloudTrail.
 |---|---|
 | AWS account | `<fill in>` |
 | Region | `us-east-1` |
-| Root stack | `md6-todo-dev-root` (9 nested stacks under it) |
-| Bootstrap stack (Git sync) | `<fill in - whatever name you gave it in the console>` |
+| Root stack | `md6-todo-dev-root` (7 nested stacks under it) |
+| Bootstrap stack (Git sync, in `md6-bootstrap-repo`) | `<fill in - whatever name you gave it in the console>` |
 | GitHub org | `thierry0011` |
 | Infra repo | `md6-infra-repo` |
 | App repo | `md6-app-repo` |
@@ -45,33 +45,35 @@ AWS_PROFILE=<your-profile> ./scripts/teardown.sh
 ```
 
 This does, in order:
-1. Empties the pipeline artifact bucket and the ECR repository first — neither has a `DeletionPolicy`
-   (so CloudFormation's default is to delete them), but both refuse to delete while non-empty, and both
-   are non-empty by design at teardown time. A non-empty one makes its owning nested stack — and so the
-   whole root stack — `DELETE_FAILED`.
+1. Empties the pipeline artifact bucket first — it has no `DeletionPolicy` (so CloudFormation's
+   default is to delete it), but it refuses to delete while non-empty, and it's non-empty by design at
+   teardown time. A non-empty bucket makes its owning nested stack — and so the whole root stack —
+   `DELETE_FAILED`. (The ECR repository is *not* touched here — it now lives in `md6-bootstrap-repo`,
+   outside this root stack's tree, so root-stack deletion never attempts to delete it.)
 2. `aws cloudformation delete-stack` on `md6-todo-dev-root`, then waits for `DELETE_COMPLETE`.
-   CloudFormation cascades all 9 nested stacks itself, in the correct dependency order.
+   CloudFormation cascades all 7 nested stacks itself, in the correct dependency order.
 3. Cleans up exactly what step 2 deliberately doesn't touch, because every one of these carries
    `DeletionPolicy: Retain` or `Snapshot`: the DB credentials + Django secret key secrets, the ALB
    access-logs bucket, the KMS alias (key itself left pending-retention), and reports on the RDS final
    snapshot (left in place by default — pass `--delete-snapshot` to remove it too).
 
-### 2. bootstrap.yaml's stack
+### 2. `md6-bootstrap-repo`'s stack
 
 Left untouched by the script on purpose — it's Git-sync-managed (no CLI-scriptable delete path) and
-cheap to leave running (one S3 bucket + one IAM role). If you do want to remove it: CloudFormation
+cheap to leave running (one S3 bucket, two IAM roles, the ECR repository). If you do want to remove
+it: empty the ECR repository first (ECR refuses to delete non-empty repos), then CloudFormation
 console → find the stack → *Delete*. Its `TemplatesBucket` has `DeletionPolicy: Retain`, so empty and
 delete that bucket by hand afterward if you want it gone too.
 
 ## Spinning back up later
 
-1. If `bootstrap.yaml`'s stack was deleted, redeploy it first (Git sync, see README "Deploying, in
-   order" step 1) and re-add the two GitHub repo secrets from its outputs.
-2. Push to `main` (or run `deploy-root-stack.yml` manually) to recreate the root stack + all 9 nested
-   children.
-3. Re-do the CodeConnections handshake for the app repo connection (a fresh `CicdPipelineStack` gets a
-   new connection ARN each time, so this step repeats on every full respin).
-4. Confirm the RDS instance restored correctly (if you kept the final snapshot, note this template
+1. If `md6-bootstrap-repo`'s stack was deleted, redeploy it first (Git sync, see its README) and
+   re-add the GitHub repo secrets/deployment params from its outputs (into both `md6-infra-repo` and
+   `md6-app-repo`).
+2. Push to `main` (or run `deploy-root-stack.yml` manually) to recreate the root stack + all 7 nested
+   children. Put the recreated root stack's `PipelineArtifactBucketName` output into the app repo's
+   `ARTIFACT_BUCKET` env var if the pipeline artifact bucket's account-derived name changed.
+3. Confirm the RDS instance restored correctly (if you kept the final snapshot, note this template
    creates a **fresh empty database** by default — restoring from that snapshot is a manual
    `RDS > Snapshots > Restore` step, then repoint `DBInstanceIdentifier`, not something this stack
    automates).

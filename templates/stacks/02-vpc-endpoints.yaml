@@ -103,3 +103,20 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-vpce-secretsmanager
+
+  # ECS resolves the taskdef's SSM-backed secrets (proxy/Redis endpoints) at task launch - no NAT, so it needs this.
+  SsmEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VpcId
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.ssm
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref AppSubnet1Id
+        - !Ref AppSubnet2Id
+      SecurityGroupIds:
+        - !Ref VpcEndpointsSecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${Environment}-vpce-ssm

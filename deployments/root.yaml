@@ -22,17 +22,16 @@ parameters:
   DBAllocatedStorage: "20"
   DBEngineVersion: "16.4"
   DBName: todoapp
-  DBMultiAZ: "false"
+  DBMultiAZ: "true"
   DBDeletionProtection: "false"
   DBBackupRetentionDays: "7"
   CacheNodeType: cache.t3.micro
   NumCacheClusters: "1"
-  GitHubOrg: "thierry0011"
-  GitHubAppRepo: "md6-app-repo"
-  GitHubDeployBranch: "main"
-  # bootstrap.yaml already created the account's OIDC provider - this stack
-  # must not try to create a second one.
-  CreateOidcProvider: "false"
+  # From Md6-bootstrap-repo's stack outputs (EcrRepositoryName / EcrRepositoryArn /
+  # GitHubActionsRoleArn) - deploy that stack first and copy its actual values in here.
+  EcrRepositoryName: "md6-todo-dev-app"
+  EcrRepositoryArn: "arn:aws:ecr:us-east-1:711387109786:repository/md6-todo-dev-app"
+  GitHubActionsRoleArn: "arn:aws:iam::711387109786:role/md6-todo-dev-github-actions-ecr-push"
   TaskCpu: "512"
   TaskMemory: "1024"
   ContainerImage: public.ecr.aws/docker/library/httpd:2.4

@@ -1,22 +1,21 @@
 # To-Do App — Infrastructure (CloudFormation nested stacks)
 
 Infrastructure-as-code for a highly available, containerized Django To-Do app on ECS Fargate. A single
-**root stack** (`templates/root.yaml`) owns 9 **nested stacks** (network, security, vpc-endpoints,
-database, cache, github-oidc, ecr, ecs-alb, autoscaling, cicd-pipeline) as `AWS::CloudFormation::Stack`
-resources, wired together with `!GetAtt`.
+**root stack** (`templates/root.yaml`) owns 7 **nested stacks** (network, security, vpc-endpoints,
+database, cache, ecs-alb, autoscaling, cicd-pipeline) as `AWS::CloudFormation::Stack` resources, wired
+together with `!GetAtt`.
 
-Two different deploy mechanisms are used, deliberately:
-- **`bootstrap.yaml`** (one-time prerequisite, not part of the nested tree) is deployed via **AWS
-  CloudFormation Git sync** — small, security-sensitive, rarely changes, benefits from the PR-review step
-  Git sync gives you.
-- **`root.yaml`** (the actual application infra) is deployed by `.github/workflows/deploy-root-stack.yml`:
-  on every push touching `templates/root.yaml`, `templates/stacks/**`, or `deployments/root.yaml`, GitHub
-  Actions packages the nested-stack templates to S3 and runs `aws cloudformation deploy` **in the same
-  job run** — no intermediate file is ever committed anywhere. Git sync isn't used here at all (see "Why
-  root.yaml isn't Git-sync-deployed" below) because it has no mechanism to resolve a nested stack's
-  relative `TemplateURL`.
-
-Application code lives in a separate repo: **md6-app-repo**.
+This is one of **three** repos:
+- **`md6-bootstrap-repo`** (deployed first, standalone) — the S3 templates bucket, the shared GitHub
+  OIDC provider, both deploy roles, and the ECR repository. See its own README for why these live
+  outside this repo's nested-stack tree entirely.
+- **`md6-infra-repo`** (this repo) — the actual application infra (`root.yaml`), deployed by
+  `.github/workflows/deploy-root-stack.yml`: on every push touching `templates/root.yaml`,
+  `templates/stacks/**`, or `deployments/root.yaml`, GitHub Actions packages the nested-stack templates
+  to S3 and runs `aws cloudformation deploy` **in the same job run** — no intermediate file is ever
+  committed anywhere. Git sync isn't used here (see "Why root.yaml isn't Git-sync-deployed" below)
+  because it has no mechanism to resolve a nested stack's relative `TemplateURL`.
+- **`md6-app-repo`** — the application code.
 
 ## Architecture
 
@@ -33,7 +32,7 @@ Internet ──HTTP───▶ ALB (public subnets, 2 AZ)
       RDS Proxy (data subnets)   ElastiCache Redis (cache subnets)
               │
               ▼
-      RDS PostgreSQL (data subnets, db.t3, single-AZ by default)
+      RDS PostgreSQL (data subnets, db.t3, Multi-AZ by default)
 
 No NAT Gateway by default — ECS tasks and the RDS Proxy reach ECR, S3, CloudWatch
 Logs and Secrets Manager entirely through VPC interface/gateway endpoints. The
@@ -43,13 +42,22 @@ ECR push (any tag) ──▶ EventBridge (digest override) ──▶ CodePipelin
   ──▶ CodeBuild (run `manage.py migrate`) ──▶ CodeDeploy (blue/green) ──▶ ECS
 ```
 
-Diagram-as-code source lives under [`diagrams/`](diagrams/) (`diagrams` / mingrammer, standard AWS icons):
+Diagram-as-code source lives under [`diagrams/`](diagrams/), in two forms covering the same
+architecture (all 3 repos, every service, how they connect):
 
 ```bash
 pip install diagrams
 # install the Graphviz `dot` binary for your OS (brew/apt/choco install graphviz)
-cd diagrams && python architecture_diagram.py   # -> architecture.png
+cd diagrams && python architecture_diagram.py         # -> architecture.png (mingrammer, AWS icons)
+python architecture_diagram_drawio.py                 # -> architecture.drawio (editable, portrait)
 ```
+
+`architecture.drawio` is a plain mxGraph/diagrams.net XML file, not an image — open it at
+[app.diagrams.net](https://app.diagrams.net) (*File → Open From → Device*) or with the VS Code
+"Draw.io Integration" extension to view or edit it directly. It uses draw.io's real AWS4 icon
+library throughout (exact stencil names/colors pulled from draw.io's own shape-library source,
+not approximated) — proper service icons for compute/database/network/security/storage/dev-tools,
+and the official VPC/public-subnet/private-subnet group container shapes, not generic boxes.
 
 ## Source of truth
 
@@ -62,21 +70,21 @@ written into the repo, never committed, doesn't exist once the job finishes.
 
 | Stack | Template | Creates | Depends on (via `!GetAtt`) |
 |---|---|---|---|
-| — | `bootstrap.yaml` (standalone, **not nested**) | S3 bucket for packaged templates, `InfraDeployRole` (dual-trust: GitHub OIDC for this repo's deploy workflow + `cloudformation.amazonaws.com` as root's execution role) | — |
+| — | `md6-bootstrap-repo` (separate repo, standalone) | S3 bucket for packaged templates, shared GitHub OIDC provider, `InfraDeployRole` (dual-trust: GitHub OIDC for this repo's deploy workflow + `cloudformation.amazonaws.com` as root's execution role), `GitHubActionsEcrPushRole`, the ECR repository | — |
 | `NetworkStack` | `stacks/00-network.yaml` | VPC, 4 dedicated subnet tiers (public/app/data/cache) x 2 AZ, routing, S3 gateway endpoint | — |
 | `SecurityStack` | `stacks/01-security.yaml` | 6 security groups (alb→app→proxy→db chain, app→cache, app/proxy→vpce), shared KMS CMK | Network |
 | `VpcEndpointsStack` | `stacks/02-vpc-endpoints.yaml` | Interface endpoints: ECR api/dkr, CloudWatch Logs, Secrets Manager | Network, Security |
-| `DatabaseStack` | `stacks/03-database.yaml` | RDS PostgreSQL, Secrets Manager credentials, **RDS Proxy** | Network, Security |
-| `CacheStack` | `stacks/04-cache.yaml` | ElastiCache Redis (ReplicationGroup, 1 node by default) | Network, Security |
-| `GithubOidcStack` | `stacks/06-github-oidc.yaml` | GitHub OIDC provider (conditional) + role for the app repo's CI | — |
-| `EcrStack` | `stacks/05-ecr.yaml` | ECR repository (IMMUTABLE tags), policy trusting the OIDC role | Security, GithubOidc |
+| `DatabaseStack` | `stacks/03-database.yaml` | RDS PostgreSQL (Multi-AZ by default), Secrets Manager credentials, **RDS Proxy**, SSM parameter for the Proxy endpoint | Network, Security |
+| `CacheStack` | `stacks/04-cache.yaml` | ElastiCache Redis (ReplicationGroup, 1 node by default), SSM parameter for its endpoint | Network, Security |
 | `EcsAlbStack` | `stacks/07-ecs-alb.yaml` | ALB (2 target groups, 2 listeners), ALB access-logs bucket, ECS cluster/service/task def | Network, Security, Database, Cache |
 | `AutoscalingStack` | `stacks/08-autoscaling.yaml` | Application Auto Scaling (1–4 tasks, CPU target tracking) | EcsAlb |
-| `CicdPipelineStack` | `stacks/09-cicd-pipeline.yaml` | CodeStar connection, CodePipeline, CodeBuild (DB migration), CodeDeploy blue/green, EventBridge trigger | Network, Security, Ecr, EcsAlb |
+| `CicdPipelineStack` | `stacks/09-cicd-pipeline.yaml` | Pipeline artifact bucket, CodePipeline, CodeBuild (DB migration), CodeDeploy blue/green, EventBridge trigger | Network, Security, EcsAlb, `EcrRepositoryName`/`EcrRepositoryArn`/`GitHubActionsRoleArn` (root params, from `md6-bootstrap-repo`'s outputs) |
 
-`GithubOidcStack` and `EcrStack` are listed out of numeric order because that's the real dependency
-direction: `EcrStack`'s repository policy needs `GithubOidcStack`'s role ARN. Deliberately
-one-directional — nested-stack ordering resolves it, no manual two-deploy dance needed.
+The ECR repository and the GitHub OIDC roles live in `md6-bootstrap-repo`, not in this nested-stack
+tree — see that repo's README for why (chicken-and-egg: the deploy role that would create them needs
+the OIDC provider to already exist, and the app repo needs to push its first image before this stack's
+resources exist at all). `root.yaml` receives the ECR repo's name/ARN and the app repo's push role ARN
+as plain input parameters instead of owning them.
 
 ## Why RDS Proxy, and why the app never touches RDS directly
 
@@ -100,8 +108,22 @@ source action always watches one fixed, statically-configured tag, so instead:
   specific pipeline run to the exact digest just pushed — a documented AWS pattern (see AWS's
   `create-cwe-ecr-source-cfn.md`), not a workaround.
 
-The app repo's CI must **not** push a `latest` tag — see the comment in `templates/stacks/05-ecr.yaml`
-and `templates/stacks/09-cicd-pipeline.yaml`.
+The app repo's CI must **not** push a `latest` tag — see the comment in `md6-bootstrap-repo`'s
+`templates/bootstrap.yaml` and this repo's `templates/stacks/09-cicd-pipeline.yaml`.
+
+## Why the pipeline's Source stage reads an S3 artifact instead of GitHub directly
+
+`CicdPipelineStack`'s Source stage has two actions: `ImageSource` (ECR, described above) and
+`TaskDefTemplateSource` (S3, `Provider: S3`), which reads a `source/appspec-taskdef.zip` object
+containing a flat `taskdef.json` + `appspec.yaml` (the app repo's own two files, still with the literal
+`<IMAGE1_NAME>` placeholder CodeDeploy substitutes). The app repo's `build-and-push.yml` uploads that
+zip itself, using its own GitHub OIDC role — `PipelineArtifactBucketPolicy` and
+`GitHubActionsArtifactUploadKmsPolicy` (both in `09-cicd-pipeline.yaml`) grant it `s3:PutObject` on just
+the bucket's `source/*` prefix and KMS encrypt/decrypt, nothing more. CodePipeline itself never talks to
+GitHub — there's no CodeStar/CodeConnections resource in this stack at all, and so no interactive OAuth
+handshake to complete for the app repo (unlike `md6-bootstrap-repo`'s Git sync, which does need one).
+The upload happens *before* the image push in that workflow, deliberately, so the template is always
+already sitting in S3 by the time the push triggers the EventBridge rule above.
 
 ## Database migrations under blue/green
 
@@ -120,12 +142,21 @@ path returning a plain `200` with a small JSON body (e.g. `{"status": "ok"}`) �
 dependency, so the health check itself never flaps on a transient DB/cache blip. This is enforced at the
 infra layer now; the app repo phase must honor it.
 
+This is separate from the ECS **task's own** health status in the console: that column stays
+`UNKNOWN` forever unless the task definition itself declares a container-level `healthCheck` (a
+Dockerfile's own `HEALTHCHECK` isn't picked up on Fargate). The real app's `ecs/taskdef.json` (in the
+app repo) declares one hitting the same `/health/` path over `localhost`; the CFN-managed bootstrap
+placeholder task in `07-ecs-alb.yaml` deliberately does **not** — its `httpd` image has neither `curl`
+nor `wget`, so a health check there would just report every placeholder task unhealthy and get it
+cycled by ECS. That placeholder is short-lived (replaced on the first real CodeDeploy deployment), so
+this is an acceptable, deliberate gap, not an oversight.
+
 ## Two-phase deploy lifecycle
 
-**Phase 1 — bootstrap (one-time, standalone, do this first).** `templates/bootstrap.yaml` /
-`deployments/bootstrap.yaml`, deployed via Git sync, create the S3 bucket that packaged templates get
-uploaded to, and `InfraDeployRole` — the one role used for everything else from here on.
-`bootstrap.yaml` is **not part of the nested-stack tree**.
+**Phase 1 — bootstrap (one-time, standalone, do this first).** `md6-bootstrap-repo`, deployed via Git
+sync, creates the S3 bucket that packaged templates get uploaded to, the shared GitHub OIDC provider,
+`InfraDeployRole`, `GitHubActionsEcrPushRole`, and the ECR repository — everything used from here on
+by both this repo and the app repo. None of it is part of this repo's nested-stack tree.
 
 **Phase 2 — the nested stack (ongoing).** Push a change to `templates/root.yaml`,
 `templates/stacks/**`, or `deployments/root.yaml` → `.github/workflows/deploy-root-stack.yml` assumes
@@ -149,32 +180,34 @@ OIDC (to call `aws cloudformation deploy`), a second lets `cloudformation.amazon
 
 ## One-time prerequisites (console, unavoidable manual steps)
 
-Git sync (for `bootstrap.yaml`) and CodePipeline's GitHub source (in `CicdPipelineStack`) both rely on
-**AWS CodeConnections**, which requires a one-time interactive OAuth handshake — this cannot be scripted.
+Git sync (for `md6-bootstrap-repo`) relies on **AWS CodeConnections**, which requires a one-time
+interactive OAuth handshake — this cannot be scripted. This is the *only* CodeConnections handshake in
+the whole lab now: `CicdPipelineStack`'s app-side source is an S3 artifact the app repo's CI uploads
+itself (see "Why the pipeline's Source stage reads an S3 artifact instead of GitHub directly" above),
+not a GitHub connection.
 
-1. **Link this repo for Git sync**: CloudFormation console → *Stacks* → *Create stack* → *With new
-   resources* → *Sync from Git* → *Link a Git repository* → GitHub → authorize AWS's GitHub App for this
-   repo. (Only needed for `bootstrap.yaml` — `root.yaml` doesn't use Git sync.)
-2. **Authorize the application repo's connection**: after `CicdPipelineStack` is created, open
-   **Developer Tools → Connections** in the console once and click **Update pending connection** on the
-   connection named in the root stack's `AppRepoConnectionArn` output (`md6-app-repo`).
+1. **Link `md6-bootstrap-repo` for Git sync**: CloudFormation console → *Stacks* → *Create stack* →
+   *With new resources* → *Sync from Git* → *Link a Git repository* → GitHub → authorize AWS's GitHub
+   App for that repo. (`root.yaml` in *this* repo doesn't use Git sync.)
 
 ## Deploying, in order
 
-1. **Deploy `bootstrap.yaml`** via Git sync: *Create stack* → *Sync from Git* → deployment file
+1. **Deploy `md6-bootstrap-repo`** via Git sync: *Create stack* → *Sync from Git* → deployment file
    `deployments/bootstrap.yaml`, template file `templates/bootstrap.yaml`. Confirm `GitHubOrg` first.
-   `CreateOidcProvider` defaults to `"false"` here on the assumption this account already has one (see
-   the comment in `deployments/bootstrap.yaml`) — flip to `"true"` if this is actually a fresh account.
-   This stack still needs its own one-time execution role, created by hand (console *Create role*, since
-   nothing exists yet to create it for you) — scoped narrowly to just what `bootstrap.yaml` itself
-   creates (S3 bucket + IAM role/OIDC provider).
-2. From `bootstrap.yaml`'s outputs, add two **repository secrets** (Settings → Secrets and variables →
-   Actions): `AWS_ROLE_ARN` ← `InfraDeployRoleArn`, `TEMPLATES_BUCKET` ← `TemplatesBucketName`.
+   `CreateOidcProvider` defaults to `"false"` there on the assumption this account already has one —
+   flip to `"true"` if this is actually a fresh account. This stack still needs its own one-time
+   execution role, created by hand (console *Create role*, since nothing exists yet to create it for
+   you) — scoped narrowly to just what that template itself creates (S3 bucket, IAM roles/OIDC
+   provider, ECR repository).
+2. From `md6-bootstrap-repo`'s outputs, add two **repository secrets** here (Settings → Secrets and
+   variables → Actions): `AWS_ROLE_ARN` ← `InfraDeployRoleArn`, `TEMPLATES_BUCKET` ←
+   `TemplatesBucketName`. Also copy `EcrRepositoryName` / `EcrRepositoryArn` / `GitHubActionsRoleArn`
+   into `deployments/root.yaml`.
 3. Push to `main` (or run `deploy-root-stack.yml` manually via *Actions → Run workflow*) — this packages
-   and deploys the root stack plus all 9 nested children in one run.
-4. Complete the CodeConnections handshake for the app repo (see above).
-5. Put the root stack's `GitHubActionsRoleArn` output into the app repo's build workflow as
-   `AWS_ROLE_ARN`.
+   and deploys the root stack plus all 7 nested children in one run.
+4. In the app repo: put `md6-bootstrap-repo`'s `GitHubActionsRoleArn` output into the build workflow's
+   `AWS_ROLE_ARN` secret, and this root stack's `PipelineArtifactBucketName` output into its
+   `ARTIFACT_BUCKET` env var.
 
 ## Bootstrapping the first deploy
 
@@ -219,19 +252,21 @@ by root-stack rollback or deletion.
   and `cache` tiers have **no internet route at all**, NAT or otherwise, regardless of this setting.
   The one place this would normally bite: the ECS bootstrap placeholder image is `public.ecr.aws/...`,
   a public endpoint with no PrivateLink data path. Solved with an ECR pull-through cache
-  (`05-ecr.yaml`'s `PublicEcrPullThroughCache`) instead of a NAT Gateway — the task pulls from our own
-  private ECR (reachable via the existing `ecr.api`/`ecr.dkr` endpoints), and ECR fetches the upstream
-  image on its own side, not over the task's network path.
-- **RDS Multi-AZ is off by default** (`DBMultiAZ: "false"`) — the VPC itself is Multi-AZ (all 4 tiers
-  span 2 AZs) per the requirement, but a standby RDS replica roughly doubles DB cost. Flip on for a real
-  production posture.
+  (`md6-bootstrap-repo`'s `PublicEcrPullThroughCache`) instead of a NAT Gateway — the task pulls from
+  our own private ECR (reachable via the existing `ecr.api`/`ecr.dkr` endpoints), and ECR fetches the
+  upstream image on its own side, not over the task's network path.
+- **RDS Multi-AZ is on by default** (`DBMultiAZ: "true"`) — the VPC itself is Multi-AZ (all 4 tiers
+  span 2 AZs), and RDS now matches: a standby replica in the second AZ, roughly doubling DB cost. Flip
+  `DBMultiAZ` to `"false"` in `deployments/root.yaml` to cut cost for a throwaway dev spin.
 - **ElastiCache is a single node by default** (`NumCacheClusters: 1`) — bump to 2+ for automatic
   failover / Multi-AZ (see `04-cache.yaml`).
 - **ECR repository is `ImageTagMutability: IMMUTABLE`** — every pushed tag is permanent, never
   silently repointed.
 - **All data at rest is KMS-encrypted** with a single rotated CMK (RDS, ElastiCache, Secrets Manager,
-  ECR, CloudWatch Logs, pipeline artifacts). ALB access logs are the one exception (SSE-S3 only — an
-  AWS limitation on that specific bucket use case, not a choice).
+  CloudWatch Logs, pipeline artifacts). Two exceptions: ALB access logs (SSE-S3 only — an AWS
+  limitation on that specific bucket use case, not a choice), and the ECR repository (AWS-managed
+  encryption — it lives in `md6-bootstrap-repo`, deployed before this repo's CMK exists; see that
+  repo's README).
 - **CI/CD uses OIDC** — no long-lived AWS credentials anywhere, each role scoped to one repo + branch
   via the `sub` claim.
 - **Database migrations run as a gated pipeline stage**, never at container startup, so a bad migration

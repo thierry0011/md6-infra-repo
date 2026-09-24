@@ -1,12 +1,19 @@
 # ECR is IMMUTABLE (unique tag per build, no "latest"), so EventBridge has no image-tag filter and instead pins the pipeline to the exact pushed digest via an InputTransformer on StartPipelineExecution (a documented AWS pattern, not a workaround).
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  To-Do App - Blue/green deployment pipeline. An EventBridge rule detects
-  every successful image push to ECR (no tag filter - see comment above)
-  and starts CodePipeline, which runs a one-off database migration via
-  CodeBuild, then pulls the deploy files (ecs/taskdef.json,
-  ecs/appspec.yaml) from the application repo and hands off to CodeDeploy
-  for an ECS blue/green traffic shift between the two ALB target groups.
+  To-Do App - Blue/green deployment pipeline. The pipeline has two Source
+  actions: an ECR source action that resolves the pushed image's digest
+  natively, and an S3 source action reading a static taskdef.json/
+  appspec.yaml template (containing a literal "<IMAGE1_NAME>" placeholder
+  in the image field) that the app repo's CI uploads via its own GitHub
+  OIDC role - CodePipeline never talks to GitHub directly, so there's no
+  CodeConnections handshake to complete for this repo. The app repo's
+  workflow uploads the template *before* pushing the image, so it's always
+  already in place by the time the ECR-push trigger fires. An EventBridge
+  rule detects every successful image push to ECR (no tag filter - see
+  comment above) and starts CodePipeline, which runs a one-off database
+  migration via CodeBuild, then hands off to CodeDeploy for an ECS
+  blue/green traffic shift between the two ALB target groups.
 
 Parameters:
   ProjectName:
@@ -18,18 +25,14 @@ Parameters:
     Default: dev
     AllowedValues: [dev, staging, prod]
 
-  GitHubOrg:
+  GitHubActionsRoleArn:
     Type: String
-    Description: GitHub org/username that owns the application repository.
-
-  GitHubAppRepo:
-    Type: String
-    Default: md6-app-repo
-    Description: Application repository name.
-
-  GitHubDeployBranch:
-    Type: String
-    Default: main
+    Description: >
+      GitHub Actions role ARN from Md6-bootstrap-repo's stack. Granted
+      write access to this stack's S3 artifact bucket (source prefix only)
+      and encrypt/decrypt on AppKmsKeyArn, so the app repo's CI can upload
+      the taskdef.json/appspec.yaml template without CodePipeline ever
+      reading from GitHub directly.
 
   DeploymentTimeoutMinutes:
     Type: Number
@@ -105,14 +108,8 @@ Parameters:
     Description: App security group id from the security stack (migration task network placement).
 
 Resources:
-  # GitHub connection - requires a one-time manual handshake in the CodeConnections console after creation.
-  AppRepoConnection:
-    Type: AWS::CodeStarConnections::Connection
-    Properties:
-      ConnectionName: !Sub ${ProjectName}-${Environment}-app-repo
-      ProviderType: GitHub
-
-  # S3 bucket CodePipeline stores stage artifacts in, KMS-encrypted.
+  # S3 bucket CodePipeline stores stage artifacts in, KMS-encrypted. Also the
+  # target the app repo's CI uploads the taskdef.json/appspec.yaml template to.
   PipelineArtifactBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -137,6 +134,37 @@ Resources:
             ExpirationInDays: 30
             NoncurrentVersionExpiration:
               NoncurrentDays: 7
+
+  # Grants the app repo's CI role write access to just the deploy-artifact prefix.
+  PipelineArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PipelineArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAppRepoCiUploadDeployArtifact
+            Effect: Allow
+            Principal:
+              AWS: !Ref GitHubActionsRoleArn
+            Action: s3:PutObject
+            Resource: !Sub ${PipelineArtifactBucket.Arn}/source/*
+
+  GitHubActionsArtifactUploadKmsPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub ${ProjectName}-${Environment}-github-actions-artifact-kms
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: EncryptDeployArtifact
+            Effect: Allow
+            Action:
+              - kms:GenerateDataKey
+              - kms:Decrypt
+            Resource: !Ref AppKmsKeyArn
+      Roles:
+        - !Select [1, !Split ["/", !Ref GitHubActionsRoleArn]]
 
   # One-off Fargate task that runs `manage.py migrate` before CodeDeploy ever shifts traffic.
   MigrationProjectRole:
@@ -378,10 +406,6 @@ Resources:
                   - kms:Decrypt
                   - kms:GenerateDataKey
                 Resource: !Ref AppKmsKeyArn
-              - Sid: UseAppRepoConnection
-                Effect: Allow
-                Action: codestar-connections:UseConnection
-                Resource: !Ref AppRepoConnection
               - Sid: EcrSourceAction
                 Effect: Allow
                 Action:
@@ -439,19 +463,19 @@ Resources:
       Stages:
         - Name: Source
           Actions:
-            - Name: AppSource
+            # Static template (taskdef.json has a literal "<IMAGE1_NAME>" placeholder) - uploaded before every image push, see the app repo's build-and-push.yml.
+            - Name: TaskDefTemplateSource
               ActionTypeId:
                 Category: Source
                 Owner: AWS
-                Provider: CodeStarSourceConnection
+                Provider: S3
                 Version: "1"
               Configuration:
-                ConnectionArn: !Ref AppRepoConnection
-                FullRepositoryId: !Sub ${GitHubOrg}/${GitHubAppRepo}
-                BranchName: !Ref GitHubDeployBranch
-                DetectChanges: "false"
+                S3Bucket: !Ref PipelineArtifactBucket
+                S3ObjectKey: source/appspec-taskdef.zip
+                PollForSourceChanges: "false"
               OutputArtifacts:
-                - Name: AppSourceOutput
+                - Name: TemplateArtifactOutput
               RunOrder: 1
             - Name: ImageSource
               ActionTypeId:
@@ -488,15 +512,15 @@ Resources:
                 Provider: CodeDeployToECS
                 Version: "1"
               InputArtifacts:
-                - Name: AppSourceOutput
+                - Name: TemplateArtifactOutput
                 - Name: ImageSourceOutput
               Configuration:
                 ApplicationName: !Ref CodeDeployApplication
                 DeploymentGroupName: !Ref CodeDeployDeploymentGroup
-                TaskDefinitionTemplateArtifact: AppSourceOutput
-                TaskDefinitionTemplatePath: ecs/taskdef.json
-                AppSpecTemplateArtifact: AppSourceOutput
-                AppSpecTemplatePath: ecs/appspec.yaml
+                TaskDefinitionTemplateArtifact: TemplateArtifactOutput
+                TaskDefinitionTemplatePath: taskdef.json
+                AppSpecTemplateArtifact: TemplateArtifactOutput
+                AppSpecTemplatePath: appspec.yaml
                 Image1ArtifactName: ImageSourceOutput
                 Image1ContainerName: IMAGE1_NAME
               RunOrder: 1
@@ -549,12 +573,9 @@ Resources:
               {"sourceRevisions": [{"actionName": "ImageSource", "revisionType": "IMAGE_DIGEST", "revisionValue": "<revisionValue>"}]}
 
 Outputs:
-  AppRepoConnectionArn:
-    Value: !Ref AppRepoConnection
-    Description: >
-      Open CodeConnections in the console once and complete the GitHub
-      authorization handshake for this connection before the pipeline can
-      pull source.
+  PipelineArtifactBucketName:
+    Value: !Ref PipelineArtifactBucket
+    Description: Put this in the app repo's build-and-push.yml as ARTIFACT_BUCKET.
 
   PipelineName:
     Value: !Ref AppPipeline

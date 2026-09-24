@@ -295,6 +295,16 @@ Resources:
                 Resource:
                   - !Ref DBCredentialsSecretArn
                   - !Ref DjangoSecretKey
+        # The app repo's taskdef.json reads POSTGRES_HOST/REDIS_HOST from these SSM parameters (03-database.yaml/04-cache.yaml).
+        - PolicyName: ReadEndpointParameters
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameters
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}-${Environment}-db-proxy-endpoint
+                  - !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ProjectName}-${Environment}-redis-endpoint
         - PolicyName: DecryptWithAppKey
           PolicyDocument:
             Version: "2012-10-17"
@@ -343,7 +353,7 @@ Resources:
         OperatingSystemFamily: LINUX
       ContainerDefinitions:
         - Name: app
-          # Placeholder pulls through our own ECR (see 05-ecr.yaml) - a real ContainerImage passes through unchanged.
+          # Placeholder pulls through our own ECR (see Md6-bootstrap-repo's bootstrap.yaml) - a real ContainerImage passes through unchanged.
           Image: !If
             - IsPlaceholderImage
             - !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/ecr-public/docker/library/httpd:2.4

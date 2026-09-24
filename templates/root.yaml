@@ -1,9 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  To-Do App - root nested-stack template. Owns all 9 child stacks (network,
-  security, vpc-endpoints, database, cache, github-oidc, ecr, ecs-alb,
-  autoscaling, cicd-pipeline) as AWS::CloudFormation::Stack resources,
-  wiring cross-stack values via !GetAtt instead of Fn::Export/Fn::ImportValue.
+  To-Do App - root nested-stack template. Owns 7 child stacks (network,
+  security, vpc-endpoints, database, cache, ecs-alb, autoscaling,
+  cicd-pipeline) as AWS::CloudFormation::Stack resources, wiring
+  cross-stack values via !GetAtt instead of Fn::Export/Fn::ImportValue.
   This is a single flat nesting (no intermediate grouping stacks) because
   the dependency graph crosses too many boundaries for grouping to pay for
   itself - see EcsAlbStack below, which pulls from network, security,
@@ -12,8 +12,10 @@ Description: >
   file to S3 and runs `aws cloudformation deploy` in the same job run - the
   packaged template is never written into the repo or committed anywhere,
   it exists only as a local file inside that job. Not Git-sync-deployed.
-  PREREQUISITE: templates/bootstrap.yaml must already be deployed - it is
-  not part of this nested-stack tree and is never superseded by it.
+  PREREQUISITE: Md6-bootstrap-repo's stack must already be deployed - the
+  GitHub OIDC provider, InfraDeployRole, and the ECR repository this stack
+  references by name/ARN (EcrRepositoryName/EcrRepositoryArn parameters)
+  all live there now, not in this nested-stack tree.
 
 Parameters:
   ProjectName:
@@ -92,7 +94,7 @@ Parameters:
 
   DBMultiAZ:
     Type: String
-    Default: "false"
+    Default: "true"
     AllowedValues: ["true", "false"]
 
   DBDeletionProtection:
@@ -113,28 +115,23 @@ Parameters:
     Type: Number
     Default: 1
 
-  # Shared between GithubOidcStack (OIDC role trust) and CicdPipelineStack (GitHub source action).
-  GitHubOrg:
+  # From Md6-bootstrap-repo's outputs - the ECR repo and the app repo's push
+  # role both live there now, not in this nested-stack tree.
+  EcrRepositoryName:
     Type: String
-    Description: GitHub org or username that owns the application repo.
+    Description: ECR repository name, from Md6-bootstrap-repo's EcrRepositoryName output.
 
-  GitHubAppRepo:
+  EcrRepositoryArn:
     Type: String
-    Default: md6-app-repo
+    Description: ECR repository ARN, from Md6-bootstrap-repo's EcrRepositoryArn output.
 
-  GitHubDeployBranch:
+  GitHubActionsRoleArn:
     Type: String
-    Default: main
-
-  CreateOidcProvider:
-    Type: String
-    Default: "true"
-    AllowedValues: ["true", "false"]
     Description: >
-      Set to "false" if bootstrap.yaml (or another project's bootstrap in
-      this same account) already created the
-      token.actions.githubusercontent.com OIDC provider (an account can
-      only have one).
+      App repo's GitHub Actions role ARN, from Md6-bootstrap-repo's
+      GitHubActionsRoleArn output. Feeds CicdPipelineStack, which grants it
+      write access to the pipeline artifact bucket's source/* prefix so
+      the app repo's CI can upload the taskdef.json/appspec.yaml template.
 
   # Feeds EcsAlbStack: Fargate task size, the bootstrap placeholder image, and Django's ALLOWED_HOSTS.
   TaskCpu:
@@ -267,34 +264,6 @@ Resources:
         - Key: Name
           Value: !Sub ${ProjectName}-${Environment}-cache
 
-  GithubOidcStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: ./stacks/06-github-oidc.yaml
-      Parameters:
-        ProjectName: !Ref ProjectName
-        Environment: !Ref Environment
-        GitHubOrg: !Ref GitHubOrg
-        GitHubAppRepo: !Ref GitHubAppRepo
-        GitHubDeployBranch: !Ref GitHubDeployBranch
-        CreateOidcProvider: !Ref CreateOidcProvider
-      Tags:
-        - Key: Name
-          Value: !Sub ${ProjectName}-${Environment}-github-oidc
-
-  EcrStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: ./stacks/05-ecr.yaml
-      Parameters:
-        ProjectName: !Ref ProjectName
-        Environment: !Ref Environment
-        AppKmsKeyArn: !GetAtt SecurityStack.Outputs.AppKmsKeyArn
-        GitHubActionsRoleArn: !GetAtt GithubOidcStack.Outputs.GitHubActionsRoleArn
-      Tags:
-        - Key: Name
-          Value: !Sub ${ProjectName}-${Environment}-ecr
-
   EcsAlbStack:
     Type: AWS::CloudFormation::Stack
     Properties:
@@ -348,13 +317,11 @@ Resources:
       Parameters:
         ProjectName: !Ref ProjectName
         Environment: !Ref Environment
-        GitHubOrg: !Ref GitHubOrg
-        GitHubAppRepo: !Ref GitHubAppRepo
-        GitHubDeployBranch: !Ref GitHubDeployBranch
+        GitHubActionsRoleArn: !Ref GitHubActionsRoleArn
         DeploymentTimeoutMinutes: !Ref DeploymentTimeoutMinutes
         AppKmsKeyArn: !GetAtt SecurityStack.Outputs.AppKmsKeyArn
-        EcrRepositoryName: !GetAtt EcrStack.Outputs.RepositoryName
-        EcrRepositoryArn: !GetAtt EcrStack.Outputs.RepositoryArn
+        EcrRepositoryName: !Ref EcrRepositoryName
+        EcrRepositoryArn: !Ref EcrRepositoryArn
         AlbFullName: !GetAtt EcsAlbStack.Outputs.AlbFullName
         BlueTargetGroupFullName: !GetAtt EcsAlbStack.Outputs.BlueTargetGroupFullName
         GreenTargetGroupFullName: !GetAtt EcsAlbStack.Outputs.GreenTargetGroupFullName
@@ -377,19 +344,9 @@ Outputs:
   AlbDnsName:
     Value: !GetAtt EcsAlbStack.Outputs.AlbDnsName
 
-  EcrRepositoryUri:
-    Value: !GetAtt EcrStack.Outputs.RepositoryUri
-
-  GitHubActionsRoleArn:
-    Value: !GetAtt GithubOidcStack.Outputs.GitHubActionsRoleArn
-    Description: Put this in the app repo's GitHub Actions workflow as the role-to-assume.
-
-  AppRepoConnectionArn:
-    Value: !GetAtt CicdPipelineStack.Outputs.AppRepoConnectionArn
-    Description: >
-      Open CodeConnections in the console once and complete the GitHub
-      authorization handshake for this connection before the pipeline can
-      pull source.
+  PipelineArtifactBucketName:
+    Value: !GetAtt CicdPipelineStack.Outputs.PipelineArtifactBucketName
+    Description: Put this in the app repo's build-and-push.yml as ARTIFACT_BUCKET.
 
   DBProxyEndpoint:
     Value: !GetAtt DatabaseStack.Outputs.DBProxyEndpoint
